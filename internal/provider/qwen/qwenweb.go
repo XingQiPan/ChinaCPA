@@ -26,6 +26,8 @@ import (
 
 	"chinacpa/internal/model"
 	"chinacpa/internal/provider"
+
+	"chinacpa/internal/fp"
 )
 
 // newUUID 会话字段 ID（fid/childrenIds）。
@@ -69,7 +71,7 @@ func (p *Provider) webDo(ctx context.Context, a *model.Account, method, path, ac
 	for k, v := range p.webHeaders(a, accept) {
 		req.Header.Set(k, v)
 	}
-	return p.http.Do(req)
+	return fp.Do("qwen", req, fp.Opts{Timeout: 60 * time.Second})
 }
 
 // webValidate 校验网页会话凭证并取用户信息（id/name/email，尽力而为）。
@@ -196,7 +198,7 @@ func (p *Provider) webSignIn(ctx context.Context, email, password string) (strin
 	for k, v := range h {
 		req.Header.Set(k, v)
 	}
-	resp, err := p.http.Do(req)
+	resp, err := fp.Do("qwen", req, fp.Opts{Timeout: 60 * time.Second})
 	if err != nil {
 		return "", "", fmt.Errorf("登录请求失败: %w", err)
 	}

@@ -38,6 +38,8 @@ import (
 
 	"chinacpa/internal/model"
 	"chinacpa/internal/provider"
+
+	"chinacpa/internal/fp"
 )
 
 const (
@@ -73,8 +75,6 @@ var builtinModels = []model.ModelInfo{
 
 // Provider 千问办公实现。
 type Provider struct {
-	http *http.Client
-
 	mu       sync.Mutex
 	sessions map[string]*loginSession
 }
@@ -91,7 +91,6 @@ type loginSession struct {
 // New 构造。
 func New() *Provider {
 	return &Provider{
-		http:     &http.Client{Timeout: 120 * time.Second},
 		sessions: map[string]*loginSession{},
 	}
 }
@@ -168,7 +167,7 @@ func (p *Provider) PollLogin(ctx context.Context, s *model.LoginSession) (*model
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-Request-Id", uuid.NewString())
-	resp, err := p.http.Do(req)
+	resp, err := fp.Do("qwenwork", req, fp.Opts{Timeout: 120 * time.Second})
 	if err != nil {
 		return &model.PollResult{Status: model.LoginPending, Message: "网络波动，继续等待授权…"}, nil
 	}
@@ -325,7 +324,7 @@ func (p *Provider) refreshDeviceToken(ctx context.Context, refreshToken string) 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	resp, err := p.http.Do(req)
+	resp, err := fp.Do("qwenwork", req, fp.Opts{Timeout: 120 * time.Second})
 	if err != nil {
 		return nil, err
 	}
@@ -544,7 +543,7 @@ func (p *Provider) Quota(ctx context.Context, a *model.Account) (*model.QuotaInf
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
-	resp, err := p.http.Do(req)
+	resp, err := fp.Do("qwenwork", req, fp.Opts{Timeout: 120 * time.Second})
 	if err != nil {
 		return nil, err
 	}
@@ -637,7 +636,7 @@ func (p *Provider) claimDailyNotice(ctx context.Context, a *model.Account) ([]by
 	for k, v := range qwenWorkClientHeaders() {
 		req.Header.Set(k, v)
 	}
-	resp, err := p.http.Do(req)
+	resp, err := fp.Do("qwenwork", req, fp.Opts{Timeout: 120 * time.Second})
 	if err != nil {
 		return nil, err
 	}
@@ -683,8 +682,7 @@ func (p *Provider) dailyCreditBalance(ctx context.Context, a *model.Account) (in
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := fp.Do("qwenwork", req, fp.Opts{Timeout: 30 * time.Second})
 	if err != nil {
 		return 0, false
 	}
@@ -739,8 +737,7 @@ func (p *Provider) Models(ctx context.Context, a *model.Account) ([]model.ModelI
 	for k, v := range signHeaders(m, full, "") {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := fp.Do("qwenwork", req, fp.Opts{Timeout: 30 * time.Second})
 	if err != nil {
 		return builtinModels, nil
 	}
@@ -835,8 +832,7 @@ func (p *Provider) ChatStream(ctx context.Context, a *model.Account, modelName s
 	for k, v := range signHeaders(m, full, bodyStr) {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 0}
-	resp, err := client.Do(req)
+	resp, err := fp.Do("qwenwork", req, fp.Opts{})
 	if err != nil {
 		return nil, err
 	}

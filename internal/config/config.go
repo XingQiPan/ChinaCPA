@@ -30,6 +30,10 @@ type Config struct {
 
 	Pricing PricingConfig `json:"pricing"`
 
+	// TLSFingerprint 浏览器 TLS 指纹伪装（JA3/JA4/HTTP2 设置帧对齐 Chrome）。
+	// 默认开启；置 false 退回标准 net/http（Go 裸指纹）。
+	TLSFingerprint *bool `json:"tls_fingerprint"`
+
 	// RequestLogDays 请求日志保留天数（本地数据库 data/requests.db，0 = 默认 90 天）
 	RequestLogDays int `json:"request_log_days"`
 
@@ -154,6 +158,10 @@ func (c *Config) normalize() {
 	}
 	if c.RequestLogDays <= 0 {
 		c.RequestLogDays = 90
+	}
+	if c.TLSFingerprint == nil {
+		on := true
+		c.TLSFingerprint = &on
 	}
 }
 

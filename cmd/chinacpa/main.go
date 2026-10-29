@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"chinacpa/internal/config"
+	"chinacpa/internal/fp"
 	"chinacpa/internal/gateway"
 	"chinacpa/internal/model"
 	"chinacpa/internal/panel"
@@ -41,6 +42,13 @@ func main() {
 		if err := config.SaveExample(*cfgPath); err == nil {
 			log.Printf("已生成示例配置 %s（请按需修改 api_key / panel_password）", *cfgPath)
 		}
+	}
+	fp.SetEnabled(*cfg.TLSFingerprint)
+	if fp.Enabled() {
+		log.Printf("TLS 指纹伪装已启用（JA3/JA4/HTTP2 对齐 Chrome；各设备版本 %s/%s/%s 等）",
+			fp.ProfileName("workbuddy"), fp.ProfileName("trae"), fp.ProfileName("qoder"))
+	} else {
+		log.Printf("TLS 指纹伪装已禁用（tls_fingerprint=false）：上游可识别 Go 客户端指纹")
 	}
 
 	st, err := store.Open(cfg.DataDir)

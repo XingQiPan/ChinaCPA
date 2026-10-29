@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,8 +23,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"chinacpa/internal/model"
 	"chinacpa/internal/provider"
+
+	"chinacpa/internal/fp"
 )
 
 const (
@@ -58,9 +63,6 @@ const (
 
 // Provider Trae 实现。
 type Provider struct {
-	http       *http.Client
-	streamHTTP *http.Client
-
 	mu       sync.Mutex
 	sessions map[string]*loginPending // trace -> 登录会话
 
@@ -105,17 +107,9 @@ func (p *Provider) purgeStaleLocked() {
 
 // New 构造。
 func New() *Provider {
-	tr := &http.Transport{
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   20,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 120 * time.Second,
-	}
 	return &Provider{
-		http:       &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		streamHTTP: &http.Client{Transport: tr},
-		sessions:   map[string]*loginPending{},
-		catalog:    map[string]string{},
+		sessions: map[string]*loginPending{},
+		catalog:  map[string]string{},
 	}
 }
 
@@ -152,6 +146,11 @@ func (p *Provider) soloHeaders(req *http.Request, a *model.Account, stream bool)
 	req.Header.Set("X-OS-Version", osVersion)
 	req.Header.Set("X-Device-Brand", deviceBrand)
 	req.Header.Set("Request-Traffic-Type", "prod")
+	// 与真实 IDE 客户端一致的链路头：缺失时部分上游能力（如 prompt cache 池）
+	// 会按「异常客户端」降级。逐请求随机，不跨请求复用。
+	req.Header.Set("X-Request-Id", uuid.NewString())
+	req.Header.Set("X-Device-Cpu", "AMD")
+	req.Header.Set("X-System-Type", "Windows")
 	if a.MachineID != "" {
 		req.Header.Set("X-Machine-Id", a.MachineID)
 	}
@@ -832,12 +831,25 @@ func (p *Provider) Checkin(ctx context.Context, a *model.Account) (*model.Checki
 		return nil, err
 	}
 	p.ugHeaders(creq, a)
-	if _, err := p.doJSON(creq); err != nil {
-		pe := provider.AsError(err)
+	claimBody, cerr := p.doJSON(creq)
+	if cerr != nil {
+		pe := provider.AsError(cerr)
 		if strings.Contains(pe.Msg, "9074") || strings.Contains(pe.Msg, "人数太多") {
 			return &model.CheckinResult{OK: false, Message: "签到人数过多（9074），明日 9 点自动再试"}, nil
 		}
-		return nil, err
+		return nil, cerr
+	}
+	// claim 可能返回 HTTP 200 + 业务码（Trae 人数过多是 200+{"code":9074}）：解析 body,
+	// 避免把失败当成功 → 回查失败又误报「设备指纹被拒」。
+	var claimCode struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(claimBody, &claimCode) == nil && claimCode.Code != 0 {
+		if claimCode.Code == 9074 || strings.Contains(claimCode.Message, "人数太多") {
+			return &model.CheckinResult{OK: false, Message: "签到人数过多（9074），明日 9 点自动再试"}, nil
+		}
+		return &model.CheckinResult{OK: false, Message: fmt.Sprintf("签到被拒（code %d: %s）", claimCode.Code, claimCode.Message)}, nil
 	}
 	// claim 返回 code 0 不代表记上（设备指纹被拒也返回 0）：回查状态确认。
 	after, afterChecked := p.freeCredits(ctx, a)
@@ -979,7 +991,37 @@ func (p *Provider) sceneFor(modelName string) string {
 // ── 对话转发（OpenAI → SOLO，SSE 双向转换） ───────────────
 
 // prepareBody OpenAI → SOLO 请求体改写（function 用 scene）。
+// deriveSessionID 生成稳定会话标识：按 账号+system 消息内容哈希。
+// 同一客户端会话（system 前缀不变）的多轮请求得到同一 id → 上游 prompt cache 命中；
+// 不同会话/不同账号自动隔离。客户端显式带 session_id 时不走这里。
+func deriveSessionID(obj map[string]any, modelName, accountID string) string {
+	sys := ""
+	if msgs, ok := obj["messages"].([]any); ok {
+		for _, mi := range msgs {
+			if m, ok := mi.(map[string]any); ok {
+				if r, _ := m["role"].(string); r == "system" {
+					if c, ok := m["content"].(string); ok {
+						sys = c
+						break
+					}
+				}
+			}
+		}
+	}
+	sum := sha256.Sum256([]byte(accountID + "|" + modelName + "|" + sys))
+	return "chinacpa-" + hex.EncodeToString(sum[:])[:32]
+}
+
+// prepareBody 构造上游请求体：上游按 session_id 分桶做 prompt cache，
+// 客户端未提供会话标识时生成稳定 session_id（按 模型+system消息哈希），
+// 让相同前缀的跨请求命中缓存；客户端显式带 session_id 时尊重之。
 func prepareBody(src []byte, modelName, scene string) []byte {
+	return prepareBodyFor(src, modelName, scene, "")
+}
+
+// prepareBodyFor 带账号维度：session_id 哈希掺入 accountID，避免同 system 模板的
+// 不同账号挤占同一缓存池。
+func prepareBodyFor(src []byte, modelName, scene, accountID string) []byte {
 	if len(src) == 0 {
 		return src
 	}
@@ -991,6 +1033,12 @@ func prepareBody(src []byte, modelName, scene string) []byte {
 	obj["function"] = scene
 	obj["config_name"] = modelName
 	obj["model"] = modelName
+	// 会话标识：客户端显式提供 > 由内容哈希派生（稳定，同前缀命中缓存）
+	if sid, _ := obj["session_id"].(string); sid == "" {
+		obj["session_id"] = deriveSessionID(obj, modelName, accountID)
+	} else {
+		obj["session_id"] = sid
+	}
 	// Trae 上游 FunctionDefinition.parameters 只接受字符串，OpenAI 协议是对象
 	provider.NormalizeToolParamsString(obj)
 	if msgs, ok := obj["messages"].([]any); ok {
@@ -1039,13 +1087,13 @@ func (p *Provider) ChatStream(ctx context.Context, a *model.Account, modelName s
 	if json.Unmarshal(body, &probe) == nil {
 		wantStream = probe.Stream
 	}
-	prepared := prepareBody(body, modelName, p.sceneFor(modelName))
+	prepared := prepareBodyFor(body, modelName, p.sceneFor(modelName), a.UID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, agentHost+epChat, bytes.NewReader(prepared))
 	if err != nil {
 		return nil, err
 	}
 	p.soloHeaders(req, a, true)
-	resp, err := p.streamHTTP.Do(req)
+	resp, err := fp.Do("trae", req, fp.Opts{})
 	if err != nil {
 		return nil, err
 	}
@@ -1112,7 +1160,7 @@ func classify(status int, raw []byte) *provider.Error {
 // ── 工具 ─────────────────────────────────────────────────
 
 func (p *Provider) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := p.http.Do(req)
+	resp, err := fp.Do("trae", req, fp.Opts{Timeout: 120 * time.Second})
 	if err != nil {
 		return nil, err
 	}

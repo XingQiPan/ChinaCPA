@@ -25,6 +25,8 @@ import (
 
 	"chinacpa/internal/model"
 	"chinacpa/internal/provider"
+
+	"chinacpa/internal/fp"
 )
 
 const (
@@ -71,7 +73,6 @@ var globalModelDisplay = map[string]string{
 
 // Provider WorkBuddy 实现（realm: "cn" / "global" → id workbuddy / workbuddy-intl）。
 type Provider struct {
-	http *http.Client
 	// realm 实例区域：cn = 国内（codebuddy.cn），global = 国际（workbuddy.ai）
 	realm string
 	// loginSessions 面板登录会话（state -> session）
@@ -89,7 +90,6 @@ func New(realm string) *Provider {
 		realm = "cn"
 	}
 	return &Provider{
-		http:          &http.Client{Timeout: 60 * time.Second},
 		realm:         realm,
 		sessions:      map[string]*model.LoginSession{},
 		measuredCreds: map[string]float64{},
@@ -273,7 +273,7 @@ type envelope struct {
 
 // doJSON 发请求解信封；HTTP >= 400 或 code != 0 返回 *provider.Error。
 func (p *Provider) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := p.http.Do(req)
+	resp, err := fp.Do("workbuddy", req, fp.Opts{Timeout: 60 * time.Second})
 	if err != nil {
 		return nil, err
 	}
@@ -1283,8 +1283,7 @@ func (p *Provider) ChatStream(ctx context.Context, a *model.Account, modelName s
 		return nil, err
 	}
 	p.chatHeaders(req, a)
-	client := &http.Client{Timeout: 0}
-	resp, err := client.Do(req)
+	resp, err := fp.Do("workbuddy", req, fp.Opts{})
 	if err != nil {
 		return nil, err
 	}

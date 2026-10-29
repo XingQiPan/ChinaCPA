@@ -33,6 +33,8 @@ import (
 	"chinacpa/internal/model"
 	"chinacpa/internal/provider"
 	"chinacpa/internal/provider/qoder/qauth"
+
+	"chinacpa/internal/fp"
 )
 
 const campaignsPath = "/sash/api/v1/me/campaigns"
@@ -77,7 +79,6 @@ type oauthPending struct {
 
 // Provider Qoder 实现（realm: "cn"/"intl" → provider id qoder / qoder-intl）。
 type Provider struct {
-	http  *http.Client
 	realm string
 	id    string
 
@@ -116,7 +117,6 @@ func New(realm string) *Provider {
 		id = "qoder-intl"
 	}
 	return &Provider{
-		http:    &http.Client{Timeout: 120 * time.Second},
 		realm:   realm,
 		id:      id,
 		bridges: map[string]*bridge{},
@@ -344,7 +344,7 @@ func (p *Provider) PollLogin(ctx context.Context, s *model.LoginSession) (*model
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "QoderWork")
-	resp, err := p.http.Do(req)
+	resp, err := fp.Do("qoder", req, fp.Opts{Timeout: 120 * time.Second})
 	if err != nil {
 		return &model.PollResult{Status: model.LoginPending, Message: "网络波动，继续等待授权…"}, nil
 	}
@@ -377,7 +377,7 @@ func (p *Provider) PollLogin(ctx context.Context, s *model.LoginSession) (*model
 		uireq.Header.Set("Accept", "application/json")
 		uireq.Header.Set("User-Agent", cfg.ua)
 		uireq.Header.Set("Authorization", "Bearer "+token)
-		if uiresp, err := p.http.Do(uireq); err == nil {
+		if uiresp, err := fp.Do("qoder", uireq, fp.Opts{Timeout: 120 * time.Second}); err == nil {
 			uiraw, _ := io.ReadAll(io.LimitReader(uiresp.Body, 1<<20))
 			uiresp.Body.Close()
 			var ui struct {
@@ -536,7 +536,7 @@ func (p *Provider) RefreshToken(ctx context.Context, a *model.Account) (bool, er
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", cfg.ua)
-	resp, err := p.http.Do(req)
+	resp, err := fp.Do("qoder", req, fp.Opts{Timeout: 120 * time.Second})
 	if err != nil {
 		return false, err
 	}
@@ -683,7 +683,7 @@ func (p *Provider) Checkin(ctx context.Context, a *model.Account) (*model.Checki
 		}
 		req.Header.Set("Origin", origin)
 		req.Header.Set("Referer", b.region.OpenAPIBase+"/growth-page/activity-iframe")
-		resp, rerr := p.http.Do(req)
+		resp, rerr := fp.Do("qoder", req, fp.Opts{Timeout: 120 * time.Second})
 		if rerr != nil {
 			return nil, 0, rerr
 		}
@@ -701,6 +701,11 @@ func (p *Provider) Checkin(ctx context.Context, a *model.Account) (*model.Checki
 	list, _, err := do(campaignsPath, http.MethodGet)
 	if err != nil {
 		return &model.CheckinResult{OK: false, Message: err.Error()}, nil
+	}
+	// 列表响应本身可能带业务码（如 10001 签到活动未开启/已过期），提前准确报出
+	if code, _ := list["code"].(float64); code != 0 {
+		msg, _ := list["msg"].(string)
+		return &model.CheckinResult{OK: false, Message: fmt.Sprintf("签到活动不可用（code %d: %s）", int(code), msg)}, nil
 	}
 	items := campaignsFrom(list)
 	var claimable, claimed int
@@ -727,6 +732,7 @@ func (p *Provider) Checkin(ctx context.Context, a *model.Account) (*model.Checki
 		return &model.CheckinResult{OK: false, Message: "上游当前没有进行中的签到活动"}, nil
 	}
 	okCount := 0
+	var claimErr string
 	for _, c := range items {
 		if c["actionType"] != "CLAIM_BENEFIT" || c["claimStatus"] != "CLAIMABLE" {
 			continue
@@ -739,12 +745,26 @@ func (p *Provider) Checkin(ctx context.Context, a *model.Account) (*model.Checki
 				continue
 			}
 		}
-		if _, _, cerr := do(campaignsPath+"/"+cid+"/claim", http.MethodPost); cerr == nil {
+		resp, _, cerr := do(campaignsPath+"/"+cid+"/claim", http.MethodPost)
+		if cerr == nil {
+			// claim 可能返回 HTTP 200 + 业务码（如 10001 签到未开启/过期），需解析
+			if code, _ := resp["code"].(float64); code != 0 {
+				msg, _ := resp["msg"].(string)
+				claimErr = fmt.Sprintf("签到被拒（code %d: %s）", int(code), msg)
+				continue
+			}
 			okCount++
+			continue
+		}
+		if claimErr == "" {
+			claimErr = cerr.Error()
 		}
 	}
 	if okCount > 0 {
 		return &model.CheckinResult{OK: true, Message: fmt.Sprintf("签到成功（领取 %d 项积分活动）", okCount), CreditsEarned: int64(okCount)}, nil
+	}
+	if claimErr != "" {
+		return &model.CheckinResult{OK: false, Message: claimErr}, nil
 	}
 	return &model.CheckinResult{OK: false, Message: "领取未确认（可能异步入账，稍后刷新额度查看）"}, nil
 }

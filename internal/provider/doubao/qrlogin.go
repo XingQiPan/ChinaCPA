@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"chinacpa/internal/model"
+
+	"chinacpa/internal/fp"
 )
 
 // 扫码会话状态机。
@@ -71,7 +73,7 @@ func (p *Provider) qrGet(ctx context.Context, u string, sess *qrSession, withCSR
 	if withCSRF && sess.csrf != "" {
 		req.Header.Set("x-tt-passport-csrf-token", sess.csrf)
 	}
-	resp, err := p.http.Do(req)
+	resp, err := fp.Do("doubao", req, fp.Opts{NoRedirect: true})
 	if err != nil {
 		return 0, nil, "", err
 	}

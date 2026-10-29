@@ -44,6 +44,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+
+	"chinacpa/internal/fp"
 )
 
 // --- Region Configuration ---
@@ -702,6 +704,7 @@ func commonHeaders(machineID, machineToken, machineType, date, sig string) http.
 }
 
 func postEncoded(ctx context.Context, urlStr string, obj interface{}, machineID, machineToken, machineType string) (map[string]interface{}, error) {
+	// 盐用 machineID（同一凭证派生，跨调用稳定）
 	date := CurrentDate()
 	sig := Sign(date)
 	plain, err := marshalNoEscape(obj)
@@ -718,8 +721,7 @@ func postEncoded(ctx context.Context, urlStr string, obj interface{}, machineID,
 	}
 	req.Header = headers
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := fp.Do("qoder:"+machineID, req, fp.Opts{Timeout: 15 * time.Second})
 	if err != nil {
 		return nil, err
 	}
@@ -921,7 +923,7 @@ func FetchQuotaUsage(ctx context.Context, bearer string, region *RegionConfig) (
 
 	started := time.Now()
 	log.Printf("[auth] OpenAPI request: method=GET url=%s headers={Accept: application/json, Authorization: Bearer [REDACTED]} body=<empty>", urlStr)
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := fp.Do("qoder-openapi", req, fp.Opts{Timeout: 15 * time.Second})
 	if err != nil {
 		log.Printf("[auth] OpenAPI request failed: method=GET url=%s duration=%s error=%v", urlStr, time.Since(started), err)
 		return nil, err
@@ -1016,7 +1018,7 @@ func openAPITokenRequest(ctx context.Context, urlStr string, payload interface{}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "qoder/"+openAPIUserAgentVersion)
 
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := fp.Do("qoder-openapi", req, fp.Opts{Timeout: 15 * time.Second})
 	if err != nil {
 		return nil, err
 	}
@@ -1173,8 +1175,7 @@ func call(ctx context.Context, sess *SessionContext, method, fullURL string, jso
 	}
 	req.Header = headers
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := fp.Do("qoder:"+sess.Identity.UID, req, fp.Opts{Timeout: 30 * time.Second})
 	if err != nil {
 		return nil, err
 	}
@@ -1235,7 +1236,6 @@ func (t StreamTimeouts) normalized() StreamTimeouts {
 
 var (
 	streamTimeoutsVal atomic.Pointer[StreamTimeouts]
-	streamClientVal   atomic.Pointer[http.Client]
 )
 
 func init() {
@@ -1246,160 +1246,11 @@ func init() {
 // dedicated stream client. The client is swapped atomically so concurrent
 // requests never observe a half-updated state.
 func SetStreamTimeouts(header, idle time.Duration) {
+	// header 超时原由流式 Transport 的 ResponseHeaderTimeout 承载；改走
+	// internal/fp 后由 OpenStreamLines 的 ctx deadline 实现（见下）。
+	_ = header
 	t := StreamTimeouts{Header: header, Idle: idle}.normalized()
-	// Own transport (cloned from the default) isolates the long-lived SSE
-	// connection pool from the short-request clients, and lets the header
-	// timeout change without touching them. ResponseHeaderTimeout is the
-	// only deadline: a Client.Timeout here would truncate long generations.
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = t.Header
-	streamClientVal.Store(&http.Client{Transport: transport})
 	streamTimeoutsVal.Store(&t)
-}
-
-// CurrentStreamTimeouts returns the effective stream timeouts.
-func CurrentStreamTimeouts() StreamTimeouts {
-	if t := streamTimeoutsVal.Load(); t != nil {
-		return *t
-	}
-	return StreamTimeouts{}.normalized()
-}
-
-// isDoneLine reports whether an SSE line carries the terminal [DONE]
-// marker. The Qoder gateway wraps [DONE] inside its Encode-layer envelope
-// ({"body":"[DONE]",...}) rather than emitting a bare "data: [DONE]";
-// both forms are accepted so test fakes and real traffic both terminate
-// cleanly.
-func isDoneLine(line string) bool {
-	if !strings.HasPrefix(line, "data:") {
-		return false
-	}
-	payload := strings.TrimSpace(line[5:])
-	if payload == "[DONE]" {
-		return true
-	}
-	var env struct {
-		Body string `json:"body"`
-	}
-	if json.Unmarshal([]byte(payload), &env) == nil && env.Body == "[DONE]" {
-		return true
-	}
-	return false
-}
-
-// isFinishEvent reports whether an SSE line is the gateway's terminal
-// "event:finish" marker. Some models (MiniMax) end their stream with this
-// event instead of a [DONE] frame, so it must count as a clean termination
-// just like [DONE].
-func isFinishEvent(line string) bool {
-	return strings.HasPrefix(line, "event:") && strings.TrimSpace(line[len("event:"):]) == "finish"
-}
-
-// isErrorEvent reports whether an SSE line is the gateway's terminal
-// "event:error" marker: the upstream provider failed and the stream is
-// about to end without [DONE]. Observed on qmodel_preview provider outages
-// (429 provider_error "All backends failed").
-func isErrorEvent(line string) bool {
-	return strings.HasPrefix(line, "event:") && strings.TrimSpace(line[len("event:"):]) == "error"
-}
-
-// InStreamError describes a gateway failure delivered inside the SSE stream
-// (HTTP status is still 200). Kept when seen so the EOF-without-[DONE]
-// fallback reports the real cause instead of a misleading "connection
-// truncated". Status carries the status embedded in the failure frame
-// (statusCodeValue or msgCode); 0 means unknown. Exported so the chat
-// handler can map the client response to the same status instead of a
-// generic 500 when the stream failed before any content was delivered.
-type InStreamError struct {
-	Status int
-	Detail string
-}
-
-func (e *InStreamError) Error() string {
-	if e.Status > 0 {
-		return fmt.Sprintf("gateway in-stream error (HTTP %d): %s", e.Status, e.Detail)
-	}
-	return fmt.Sprintf("gateway in-stream error: %s", e.Detail)
-}
-
-// detectInStreamGatewayError extracts a terminal gateway/provider failure
-// from an SSE data line. Two shapes are recognized:
-//
-//  1. Envelope frame with an HTTP error status, e.g. (qmodel_preview
-//     provider outage):
-//     {"body":"{\"code\":\"provider_error\",\"message\":\"All backends failed\"...}",
-//     "statusCodeValue":429,"statusCode":"TOO_MANY_REQUESTS"}
-//
-//  2. Bare success:false gateway error frame, e.g.
-//     {"success":false,"msgCode":500,"message":"Internal Server Error"}
-//
-// A 200 OK envelope with normal chat/usage/[DONE] bodies returns nil.
-func detectInStreamGatewayError(line string) *InStreamError {
-	if !strings.HasPrefix(line, "data:") {
-		return nil
-	}
-	payload := strings.TrimSpace(line[len("data:"):])
-	var env struct {
-		Body        string `json:"body"`
-		StatusCode  string `json:"statusCode"`
-		StatusValue int    `json:"statusCodeValue"`
-	}
-	if err := json.Unmarshal([]byte(payload), &env); err != nil {
-		return nil
-	}
-	if env.StatusValue >= 400 {
-		detail := env.Body
-		if detail == "" {
-			detail = env.StatusCode
-		}
-		return &InStreamError{Status: env.StatusValue, Detail: trimJSONMessage(detail)}
-	}
-	if env.Body != "" || env.StatusCode != "" {
-		// A well-formed envelope with a 2xx status is a normal frame.
-		return nil
-	}
-	var bare struct {
-		Success bool   `json:"success"`
-		MsgCode int    `json:"msgCode"`
-		MsgInfo string `json:"msgInfo"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal([]byte(payload), &bare); err != nil {
-		return nil
-	}
-	if !bare.Success && (bare.MsgCode >= 400 || bare.Message != "" || bare.MsgInfo != "") {
-		// Only treat it as a failure when a message/code is present; a bare
-		// {"success":false} with no reason is too ambiguous to fail on.
-		detail := bare.Message
-		if detail == "" {
-			detail = bare.MsgInfo
-		}
-		if detail == "" {
-			detail = fmt.Sprintf("msgCode %d", bare.MsgCode)
-		}
-		return &InStreamError{Status: bare.MsgCode, Detail: detail}
-	}
-	return nil
-}
-
-// trimJSONMessage pulls the "message" field out of a JSON-string body when
-// present ("{\"code\":\"provider_error\",\"message\":\"All backends failed\"...}")
-// so the surfaced error reads "provider_error: All backends failed" instead
-// of a wall of escaped JSON.
-func trimJSONMessage(body string) string {
-	var m struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal([]byte(body), &m); err == nil {
-		if m.Code != "" && m.Message != "" {
-			return m.Code + ": " + m.Message
-		}
-		if m.Message != "" {
-			return m.Message
-		}
-	}
-	return strings.TrimSpace(body)
 }
 
 // OpenStreamLines sends a POST and reads SSE response line by line.
@@ -1421,7 +1272,9 @@ func OpenStreamLines(ctx context.Context, sess *SessionContext, fullURL string, 
 	}
 	req.Header = headers
 
-	resp, err := streamClientVal.Load().Do(req)
+	// 用 Header 超时兜住"连上但不吐响应头"的挂死；fp.Do 的 Timeout 在响应头
+	// 到达后即释放（cancel 移交 Body 关闭），不会截断长生成流。
+	resp, err := fp.Do("qoder:"+sess.Identity.UID, req, fp.Opts{Timeout: CurrentStreamTimeouts().Header})
 	if err != nil {
 		return err
 	}
@@ -1552,6 +1405,136 @@ func OpenStreamLines(ctx context.Context, sess *SessionContext, fullURL string, 
 // gateway's queue/concurrency rejection (code 10605) under a 401/403
 // statusCodeValue. Such frames look like auth failures but are admission-
 // control refusals; the caller should back off instead of refreshing tokens.
+
+// CurrentStreamTimeouts returns the effective stream timeouts.
+func CurrentStreamTimeouts() StreamTimeouts {
+	if t := streamTimeoutsVal.Load(); t != nil {
+		return *t
+	}
+	return StreamTimeouts{}.normalized()
+}
+
+// InStreamError describes a gateway failure delivered inside the SSE stream
+// (HTTP status is still 200). Kept when seen so the EOF-without-[DONE]
+// fallback reports the real cause instead of a misleading "connection
+// truncated". Status carries the status embedded in the failure frame
+// (statusCodeValue or msgCode); 0 means unknown. Exported so the chat
+// handler can map the client response to the same status instead of a
+// generic 500 when the stream failed before any content was delivered.
+type InStreamError struct {
+	Status int
+	Detail string
+}
+
+func (e *InStreamError) Error() string {
+	if e.Status > 0 {
+		return fmt.Sprintf("gateway in-stream error (HTTP %d): %s", e.Status, e.Detail)
+	}
+	return fmt.Sprintf("gateway in-stream error: %s", e.Detail)
+}
+
+// isDoneLine reports whether an SSE line carries the terminal [DONE]
+// marker. The Qoder gateway wraps [DONE] inside its Encode-layer envelope
+// ({"body":"[DONE]",...}) rather than emitting a bare "data: [DONE]";
+// both forms are accepted so test fakes and real traffic both terminate
+// cleanly.
+func isDoneLine(line string) bool {
+	if !strings.HasPrefix(line, "data:") {
+		return false
+	}
+	payload := strings.TrimSpace(line[5:])
+	if payload == "[DONE]" {
+		return true
+	}
+	var env struct {
+		Body string `json:"body"`
+	}
+	if json.Unmarshal([]byte(payload), &env) == nil && env.Body == "[DONE]" {
+		return true
+	}
+	return false
+}
+
+// isFinishEvent reports whether an SSE line is the gateway's terminal
+// "event:finish" marker. Some models (MiniMax) end their stream with this
+// event instead of a [DONE] frame, so it must count as a clean termination
+// just like [DONE].
+func isFinishEvent(line string) bool {
+	return strings.HasPrefix(line, "event:") && strings.TrimSpace(line[len("event:"):]) == "finish"
+}
+
+// isErrorEvent reports whether an SSE line is the gateway's terminal
+// "event:error" marker: the upstream provider failed and the stream is
+// about to end without [DONE]. Observed on qmodel_preview provider outages
+// (429 provider_error "All backends failed").
+func isErrorEvent(line string) bool {
+	return strings.HasPrefix(line, "event:") && strings.TrimSpace(line[len("event:"):]) == "error"
+}
+
+// detectInStreamGatewayError extracts a terminal gateway/provider failure
+// from an SSE data line. Two shapes are recognized:
+//
+//  1. Envelope frame with an HTTP error status, e.g. (qmodel_preview
+//     provider outage):
+//     {"body":"{\"code\":\"provider_error\",\"message\":\"All backends failed\"...}",
+//     "statusCodeValue":429,"statusCode":"TOO_MANY_REQUESTS"}
+//
+//  2. Bare success:false gateway error frame, e.g.
+//     {"success":false,"msgCode":500,"message":"Internal Server Error"}
+//
+// A 200 OK envelope with normal chat/usage/[DONE] bodies returns nil.
+func detectInStreamGatewayError(line string) *InStreamError {
+	if !strings.HasPrefix(line, "data:") {
+		return nil
+	}
+	payload := strings.TrimSpace(line[len("data:"):])
+	var env struct {
+		Body        string `json:"body"`
+		StatusCode  string `json:"statusCode"`
+		StatusValue int    `json:"statusCodeValue"`
+	}
+	if err := json.Unmarshal([]byte(payload), &env); err != nil {
+		return nil
+	}
+	if env.StatusValue >= 400 {
+		detail := env.Body
+		if detail == "" {
+			detail = env.StatusCode
+		}
+		return &InStreamError{Status: env.StatusValue, Detail: trimJSONMessage(detail)}
+	}
+	if env.Body != "" || env.StatusCode != "" {
+		// A well-formed envelope with a 2xx status is a normal frame.
+		return nil
+	}
+	var bare struct {
+		Success bool   `json:"success"`
+		MsgCode int    `json:"msgCode"`
+		MsgInfo string `json:"msgInfo"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(payload), &bare); err != nil {
+		return nil
+	}
+	if !bare.Success && (bare.MsgCode >= 400 || bare.Message != "" || bare.MsgInfo != "") {
+		// Only treat it as a failure when a message/code is present; a bare
+		// {"success":false} with no reason is too ambiguous to fail on.
+		detail := bare.Message
+		if detail == "" {
+			detail = bare.MsgInfo
+		}
+		if detail == "" {
+			detail = fmt.Sprintf("msgCode %d", bare.MsgCode)
+		}
+		return &InStreamError{Status: bare.MsgCode, Detail: detail}
+	}
+	return nil
+}
+
+// detectInStreamBusyError reports whether an SSE frame carries the
+// gateway's queue/concurrency rejection (code 10605) under a 401/403
+// statusCodeValue. Such frames look like auth failures but are admission-
+// control refusals; the caller should back off instead of refreshing tokens.
 func detectInStreamBusyError(line string) *BusyError {
 	s := strings.TrimSpace(line)
 	if !strings.HasPrefix(s, "data:") {
@@ -1627,6 +1610,26 @@ func detectInStreamAuthError(line string) (bool, string) {
 		}
 	}
 	return false, ""
+}
+
+// trimJSONMessage pulls the "message" field out of a JSON-string body when
+// present ("{\"code\":\"provider_error\",\"message\":\"All backends failed\"...}")
+// so the surfaced error reads "provider_error: All backends failed" instead
+// of a wall of escaped JSON.
+func trimJSONMessage(body string) string {
+	var m struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(body), &m); err == nil {
+		if m.Code != "" && m.Message != "" {
+			return m.Code + ": " + m.Message
+		}
+		if m.Message != "" {
+			return m.Message
+		}
+	}
+	return strings.TrimSpace(body)
 }
 
 func parseBody(obj map[string]interface{}) interface{} {

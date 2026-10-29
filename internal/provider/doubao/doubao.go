@@ -21,6 +21,8 @@ import (
 
 	"chinacpa/internal/model"
 	"chinacpa/internal/provider"
+
+	"chinacpa/internal/fp"
 )
 
 const dbUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -29,7 +31,6 @@ const dbUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 // 打开链接 → 豆包 App 扫码 → 自动回调纳管）；生成请求以整串 Cookie + 生成的
 // 设备标识直连网页 API（fp=s_v_web_id 随 Cookie 自带，msToken 可为空）。
 type Provider struct {
-	http *http.Client // 重定向不跟随：登录链路需手动收每跳 Set-Cookie；登录失效时上游会 302
 
 	// ImageDailyLimit / VideoDailyLimit 每账号每日生成上限（本地计数，config 注入）
 	ImageDailyLimit int64
@@ -52,12 +53,6 @@ func New(imageLimit, videoLimit int64) *Provider {
 		videoLimit = 10
 	}
 	return &Provider{
-		http: &http.Client{
-			Timeout: 30 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
 		ImageDailyLimit: imageLimit,
 		VideoDailyLimit: videoLimit,
 		qrSessions:      map[string]*qrSession{},
@@ -140,7 +135,7 @@ func (p *Provider) dbPost(ctx context.Context, a *model.Account, path string, qu
 	for k, v := range extra {
 		req.Header.Set(k, v)
 	}
-	return p.http.Do(req)
+	return fp.Do("doubao", req, fp.Opts{Timeout: 30 * time.Second, NoRedirect: true})
 }
 
 // classifyStatus HTTP 状态 → 错误分类。

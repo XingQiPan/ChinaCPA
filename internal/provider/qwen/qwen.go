@@ -20,6 +20,8 @@ import (
 
 	"chinacpa/internal/model"
 	"chinacpa/internal/provider"
+
+	"chinacpa/internal/fp"
 )
 
 const (
@@ -37,7 +39,6 @@ const (
 
 // Provider Qwen 实现。
 type Provider struct {
-	http *http.Client
 	// DailyLimit 每日免费请求数上限（config）
 	DailyLimit int64
 
@@ -51,7 +52,6 @@ func New(dailyLimit int64) *Provider {
 		dailyLimit = 2000
 	}
 	return &Provider{
-		http:       &http.Client{Timeout: 60 * time.Second},
 		DailyLimit: dailyLimit,
 		sessions:   map[string]*model.LoginSession{},
 	}
@@ -104,7 +104,7 @@ func (p *Provider) postToken(ctx context.Context, form url.Values) (*tokenResp, 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	setOAuthHeaders(req)
-	resp, err := p.http.Do(req)
+	resp, err := fp.Do("qwen", req, fp.Opts{Timeout: 60 * time.Second})
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +294,7 @@ func (p *Provider) Models(ctx context.Context, a *model.Account) ([]model.ModelI
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/models", nil)
 	if err == nil {
 		p.setHeaders(req, a, false)
-		resp, err := p.http.Do(req)
+		resp, err := fp.Do("qwen", req, fp.Opts{Timeout: 60 * time.Second})
 		if err == nil && resp.StatusCode == http.StatusOK {
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
@@ -395,8 +395,7 @@ func (p *Provider) ChatStream(ctx context.Context, a *model.Account, modelName s
 		stream = true
 	}
 	p.setHeaders(req, a, stream)
-	client := &http.Client{Timeout: 0}
-	resp, err := client.Do(req)
+	resp, err := fp.Do("qwen", req, fp.Opts{})
 	if err != nil {
 		return nil, err
 	}

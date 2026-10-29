@@ -107,7 +107,7 @@ func AggregateOpenAISSE(body io.Reader, modelName string) ([]byte, string, strin
 func mergeToolCalls(acc map[int]*aggToolCall, order *[]int, raw []json.RawMessage) {
 	for i, tc := range raw {
 		var t struct {
-			Index    *int `json:"index"`
+			Index    *int   `json:"index"`
 			ID       string `json:"id"`
 			Type     string `json:"type"`
 			Function struct {

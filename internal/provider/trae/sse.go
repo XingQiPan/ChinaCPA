@@ -63,7 +63,7 @@ func (u *openAIUsage) toMap() map[string]any {
 	}
 	if u.CacheReadTokens > 0 || u.CacheWriteTokens > 0 {
 		m["prompt_tokens_details"] = map[string]any{
-			"cached_tokens":     u.CacheReadTokens,
+			"cached_tokens":      u.CacheReadTokens,
 			"cache_write_tokens": u.CacheWriteTokens,
 		}
 	}
@@ -145,6 +145,8 @@ func (s *soloToOpenAIStream) handleEvent(evName string, dataLine string) []byte 
 		return out
 	}
 	switch evName {
+	case "metadata":
+		// 上游回显会话信息（session_id 为上游自生成，不认请求体注入），仅消费不转发
 	case "output":
 		delta := map[string]any{}
 		if v, ok := raw["response"].(string); ok && v != "" {

@@ -31,6 +31,8 @@ import (
 	"chinacpa/internal/provider"
 	"chinacpa/internal/reqlog"
 	"chinacpa/internal/usage"
+
+	"chinacpa/internal/fp"
 )
 
 // registerMedia 挂载媒体端点（由 Register 调用）。
@@ -228,7 +230,7 @@ func fetchAsB64(u string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := fp.Do("gateway", req, fp.Opts{})
 	if err != nil {
 		return "", err
 	}
