@@ -102,15 +102,15 @@ func Metrics(ov *Overview) []Metric {
 	}
 
 	type group struct {
-		label, full, provider string
+		label, full, provider  string
 		used, limit, remaining float64
-		unit                  string
-		rows                  []MetricRow
-		count                 int
-		resetsAt              string
-		quotaExceeded         bool
-		unhealthy             bool
-		daily                 bool
+		unit                   string
+		rows                   []MetricRow
+		count                  int
+		resetsAt               string
+		quotaExceeded          bool
+		unhealthy              bool
+		daily                  bool
 	}
 
 	var groups []*group

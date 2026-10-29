@@ -64,10 +64,10 @@ func (s *springValue) step(dt float64) bool {
 
 // spin 一个匀速旋转的相位，用于扫描弧。
 type spin struct {
-	phase    float64 // 0~1
-	period   float64 // 转一圈的秒数
-	active   bool
-	holdAt   float64 // 停止后停留的角度（便于淡出）
+	phase     float64 // 0~1
+	period    float64 // 转一圈的秒数
+	active    bool
+	holdAt    float64 // 停止后停留的角度（便于淡出）
 	startedAt float64
 }
 
@@ -134,10 +134,10 @@ type ringAnim struct {
 	// arc 进度弧的当前比例（弹性）
 	arc *springValue
 	// refresh 刷新扫描（拉数据时一圈彩色短弧）
-	refresh *spin
+	refresh     *spin
 	refreshFade *fade
 	// busy CLI 活动标记（白色短弧在环内侧）
-	busy *spin
+	busy     *spin
 	busyFade *fade
 	// clock 窗口时钟弧的比例（弹性）
 	clock *springValue

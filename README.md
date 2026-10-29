@@ -28,7 +28,22 @@
 - **OpenAI 兼容网关**：`/v1/models` + `/v1/chat/completions`（SSE 流式），多账号自动轮询 + 失败转移 + 限流冷却；上游凭证失效自动标记「需重新登录」并停止调度，重新导入即恢复
 - **仪表板统计**：今日/7 日 token 消耗（100M/1B 风格）、请求数、按模型费用估算（发布模型单价优先，对话 $/1M、图片/视频 $/次 → ¥ 自动折算）、剩余额度自动计算
 - **Qwen 每日限流**：`daily_request_limit` 达上限自动返回额度错误并切换到下一账号/渠道
-- **单二进制**：纯 Go 标准库，零第三方依赖，下载即用
+- **单二进制**：纯 Go 实现，`go build` 下载即用（唯一第三方依赖 `tls-client`，用于 Chrome TLS 指纹）
+
+## 🛡️ TLS 指纹伪装（JA3/JA4/HTTP2）
+
+上游风控可分析 TLS ClientHello 握手（JA3/JA4）与 HTTP/2 设置帧识别客户端真实程序：
+Go 标准库的裸指纹与官方浏览器/IDE 客户端完全对不上。本项目所有出站请求
+（含签到、额度刷新、对话流）均通过 `internal/fp` 以 Chrome 指纹发出
+（ClientHello 扩展顺序、GREASE、ALPN h2、HTTP/2 settings/窗口/伪头顺序全对齐），
+并按「provider:账号设备标识」派生稳定设备指纹——同一账号跨重启恒定像同一台设备，
+不同账号之间互不相同，避免被聚类封禁。实测 `tls.peet.ws`：`t13d1516h2_8daaf6152771_*`
+（Chrome 形态）。面板启动日志会打印每台设备选定的 Chrome 版本。
+
+```json
+// config.json —— 关闭伪装回退 Go 标准 net/http（排查兼容性问题时使用）
+{ "tls_fingerprint": false }
+```
 
 ## 🚀 快速开始
 

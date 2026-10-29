@@ -19,11 +19,11 @@ import (
 type logoKind int
 
 const (
-	logoGeneric logoKind = iota
-	logoQwen            // 六角星（通义千问的简洁标记）
-	logoWorkBuddy       // 圆角方框 + 缺口（CodeBuddy 的对话气泡感）
-	logoTrae            // 三角（Trae 的 acute 意象）
-	logoQoder           // 同心环（Qoder 的 Q）
+	logoGeneric   logoKind = iota
+	logoQwen               // 六角星（通义千问的简洁标记）
+	logoWorkBuddy          // 圆角方框 + 缺口（CodeBuddy 的对话气泡感）
+	logoTrae               // 三角（Trae 的 acute 意象）
+	logoQoder              // 同心环（Qoder 的 Q）
 )
 
 // logoFor 按平台 id 选标记。

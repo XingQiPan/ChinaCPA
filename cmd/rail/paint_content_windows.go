@@ -50,7 +50,7 @@ func setUIScale(dpi int32, screenH int32) {
 	uiScale = base * fit * userScale
 }
 
-func pd(v float64) int32 { return int32(float32(v)*uiScale + 0.5) }
+func pd(v float64) int32    { return int32(float32(v)*uiScale + 0.5) }
 func pdu(v float64) float32 { return float32(v) * uiScale }
 
 // 浮动栏尺寸。全部由 pt 值经 pd() 换算，随 DPI 与屏幕高度缩放。
@@ -59,8 +59,9 @@ func pdu(v float64) float32 { return float32(v) * uiScale }
 // 屏高），而包级 var 的初始化早于它，会永远拿到 96dpi 的默认值。
 func railWidthPillF() int32 { return pd(64) }
 func ringDiameterF() int32  { return pd(36) }
-func ringLineF() int32 { return pd(4) }
+func ringLineF() int32      { return pd(4) }
 func ringCentreGapF() int32 { return pd(4) }
+
 // itemSpacingF 环间距。
 //
 // 缩放时比环本身收得更快：小尺寸下 30pt 的间距会把整条 rail 拉得很长，
@@ -82,20 +83,20 @@ func percentFontF() int32 {
 func percentHeightF() int32 { return pd(14) }
 func ringToTextF() int32    { return pd(5) }
 
-func cardWidthF() int32      { return pd(250) }
-func cardPadF() int32        { return pd(18) }
-func cardRadiusF() int32     { return pd(20) }
-func cardPointerWF() int32   { return pd(20) }
-func cardPointerHF() int32   { return pd(40) }
-func cardGapF() int32        { return pd(8) }
+func cardWidthF() int32          { return pd(250) }
+func cardPadF() int32            { return pd(18) }
+func cardRadiusF() int32         { return pd(20) }
+func cardPointerWF() int32       { return pd(20) }
+func cardPointerHF() int32       { return pd(40) }
+func cardGapF() int32            { return pd(8) }
 func cardContentSpacingF() int32 { return pd(14) }
-func cardRowSpacingF() int32 { return pd(7) }
-func cardTitleFontF() int32 { return pd(14) }
-func cardRowFontF() int32 { return int32(11.5*float64(uiScale) + 0.5) }
-func cardHeaderIconF() int32 { return pd(16) }
-func cardBarHeightF() int32  { return pd(5) }
-func cardRowLineF() int32    { return pd(14) }
-func padTopF() int32         { return pd(20) }
+func cardRowSpacingF() int32     { return pd(7) }
+func cardTitleFontF() int32      { return pd(14) }
+func cardRowFontF() int32        { return int32(11.5*float64(uiScale) + 0.5) }
+func cardHeaderIconF() int32     { return pd(16) }
+func cardBarHeightF() int32      { return pd(5) }
+func cardRowLineF() int32        { return pd(14) }
+func padTopF() int32             { return pd(20) }
 
 // iconScale 图标占中心盘的比例。Pulse 用 0.8，但它的图标是 Lobe 的
 // 线稿 SVG（本身留白多）；我们的素材是满边方形 app icon，裁圆后 0.8
@@ -122,9 +123,9 @@ func centreDiameter() int32 {
 
 // 布局：算出当前尺寸下 rail 与卡片的矩形。
 type layout struct {
-	pill  rect   // rail（右侧贴边）
-	card  rect   // 详情卡本体（不含指针）
-	ptr   rect   // 指向环的小三角外接矩形
+	pill  rect    // rail（右侧贴边）
+	card  rect    // 详情卡本体（不含指针）
+	ptr   rect    // 指向环的小三角外接矩形
 	slots []int32 // 每个环的圆心 Y
 }
 

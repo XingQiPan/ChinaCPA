@@ -10,12 +10,12 @@ import (
 )
 
 var (
-	pCreateDIBSection  = gdi32.NewProc("CreateDIBSection")
+	pCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
 	pCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
-	pSelectObject2     = gdi32.NewProc("SelectObject")
-	pDeleteObject2     = gdi32.NewProc("DeleteObject")
-	pDeleteDC2         = gdi32.NewProc("DeleteDC")
-	pGdiFlush          = gdi32.NewProc("GdiFlush")
+	pSelectObject2      = gdi32.NewProc("SelectObject")
+	pDeleteObject2      = gdi32.NewProc("DeleteObject")
+	pDeleteDC2          = gdi32.NewProc("DeleteDC")
+	pGdiFlush           = gdi32.NewProc("GdiFlush")
 
 	pUpdateLayeredWindow = user32.NewProc("UpdateLayeredWindow")
 	pGetDCEx             = user32.NewProc("GetDC")
@@ -45,11 +45,11 @@ type bitmapInfo struct {
 }
 
 const (
-	dibRGBColors   = 0
-	biRGB          = 0
-	ulwAlpha       = 0x02
-	acSrcOver      = 0x00
-	acSrcAlpha     = 0x01
+	dibRGBColors = 0
+	biRGB        = 0
+	ulwAlpha     = 0x02
+	acSrcOver    = 0x00
+	acSrcAlpha   = 0x01
 )
 
 // dib 一块 32 位 top-down DIB section，用作分层窗口的绘制表面。

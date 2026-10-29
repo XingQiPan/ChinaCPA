@@ -21,12 +21,12 @@ import (
 
 // Options 浮动栏的运行参数。
 type Options struct {
-	BaseURL  string  // 面板地址，如 http://127.0.0.1:8313
-	Password string  // 面板密码
-	Interval int     // 轮询秒数
-	Tint     string  // 颜色主题 accent / green / teal
-	AlwaysOnTop bool // 是否置顶
-	Edge     string // 吸附边：left / right / top / bottom
+	BaseURL     string // 面板地址，如 http://127.0.0.1:8313
+	Password    string // 面板密码
+	Interval    int    // 轮询秒数
+	Tint        string // 颜色主题 accent / green / teal
+	AlwaysOnTop bool   // 是否置顶
+	Edge        string // 吸附边：left / right / top / bottom
 }
 
 // Quota 单个账号的额度快照（对应 panel 的 quota 字段）。
@@ -42,14 +42,14 @@ type Quota struct {
 	// Detail 平台自定义字段
 	Detail struct {
 		Plan              string `json:"plan"`
-		ResetsAt      string `json:"resets_at"`
-		QuotaExceeded bool   `json:"quota_exceeded"`
-		RequestsUsedToday int64 `json:"requests_used_today"`
-		ImagesUsedToday   int64 `json:"images_used_today"`
-		ImagesLimit       int64 `json:"images_limit"`
-		VideosUsedToday   int64 `json:"videos_used_today"`
-		VideosLimit       int64 `json:"videos_limit"`
-		ChatsToday        int64 `json:"chats_today"`
+		ResetsAt          string `json:"resets_at"`
+		QuotaExceeded     bool   `json:"quota_exceeded"`
+		RequestsUsedToday int64  `json:"requests_used_today"`
+		ImagesUsedToday   int64  `json:"images_used_today"`
+		ImagesLimit       int64  `json:"images_limit"`
+		VideosUsedToday   int64  `json:"videos_used_today"`
+		VideosLimit       int64  `json:"videos_limit"`
+		ChatsToday        int64  `json:"chats_today"`
 	} `json:"detail"`
 }
 
@@ -65,23 +65,23 @@ type Account struct {
 
 // Overview 面板总览的精简投影。
 type Overview struct {
-	Accounts       []Account `json:"accounts"`
-	AccountTotal   int       `json:"account_total"`
-	ProviderCount  map[string]int `json:"provider_count"`
-	TotalCredits   float64   `json:"total_credits"`
-	TotalIdeCredits float64  `json:"total_ide_credits"`
-	QwenRemaining     float64 `json:"qwen_remaining"`
-	QoderRemaining    float64 `json:"qoder_remaining"`
-	QwenWorkRemaining float64 `json:"qwenwork_remaining"`
-	Now               int64   `json:"now"`
+	Accounts          []Account      `json:"accounts"`
+	AccountTotal      int            `json:"account_total"`
+	ProviderCount     map[string]int `json:"provider_count"`
+	TotalCredits      float64        `json:"total_credits"`
+	TotalIdeCredits   float64        `json:"total_ide_credits"`
+	QwenRemaining     float64        `json:"qwen_remaining"`
+	QoderRemaining    float64        `json:"qoder_remaining"`
+	QwenWorkRemaining float64        `json:"qwenwork_remaining"`
+	Now               int64          `json:"now"`
 	Schedule          struct {
 		QuotaRefreshMinutes int   `json:"quota_refresh_minutes"`
 		NextCheckin         int64 `json:"next_checkin"`
 	} `json:"schedule"`
-	Today          struct {
-		Requests   int64   `json:"requests"`
-		TotalTokens int64  `json:"total_tokens"`
-		CostCNY    float64 `json:"cost_cny"`
+	Today struct {
+		Requests    int64   `json:"requests"`
+		TotalTokens int64   `json:"total_tokens"`
+		CostCNY     float64 `json:"cost_cny"`
 	} `json:"today"`
 }
 

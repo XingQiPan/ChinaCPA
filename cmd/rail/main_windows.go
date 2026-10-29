@@ -15,15 +15,15 @@ import (
 
 func main() {
 	var (
-		base     = flag.String("url", "http://127.0.0.1:8313", "面板地址")
-		pass     = flag.String("password", "", "面板密码（留空读取 config.json）")
-		config   = flag.String("config", "config.json", "chinacpa 配置文件，用于读密码与端口")
-		interval = flag.Int("interval", 60, "轮询间隔（秒）")
-		top      = flag.Bool("top", true, "窗口是否置顶")
-		demo     = flag.Bool("demo", false, "用示例数据预览外观（不连服务）")
+		base         = flag.String("url", "http://127.0.0.1:8313", "面板地址")
+		pass         = flag.String("password", "", "面板密码（留空读取 config.json）")
+		config       = flag.String("config", "config.json", "chinacpa 配置文件，用于读密码与端口")
+		interval     = flag.Int("interval", 60, "轮询间隔（秒）")
+		top          = flag.Bool("top", true, "窗口是否置顶")
+		demo         = flag.Bool("demo", false, "用示例数据预览外观（不连服务）")
 		demoExpanded = flag.Bool("demo-expanded", false, "配合 -demo：直接展开详情卡")
-		scale    = flag.Float64("scale", 0, "额外缩放，0=按屏幕自动；如 0.85 / 1.2")
-		edge     = flag.String("edge", "right", "吸附边：left / right / top / bottom")
+		scale        = flag.Float64("scale", 0, "额外缩放，0=按屏幕自动；如 0.85 / 1.2")
+		edge         = flag.String("edge", "right", "吸附边：left / right / top / bottom")
 	)
 	flag.Parse()
 

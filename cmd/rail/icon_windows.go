@@ -252,9 +252,9 @@ func (p *painter) blitBGRA(img *iconImage, dx, dy int32) {
 			// 源覆盖：预乘 alpha 的 over 运算
 			d := buf[ty*tw+tx]
 			inv := 255 - sa
-			nr := (s>>16&0xFF) + (d>>16&0xFF)*inv/255
-			ng := (s>>8&0xFF) + (d>>8&0xFF)*inv/255
-			nb := (s&0xFF) + (d&0xFF)*inv/255
+			nr := (s >> 16 & 0xFF) + (d>>16&0xFF)*inv/255
+			ng := (s >> 8 & 0xFF) + (d>>8&0xFF)*inv/255
+			nb := (s & 0xFF) + (d&0xFF)*inv/255
 			na := sa + (d>>24)*inv/255
 			buf[ty*tw+tx] = na<<24 | nr<<16 | ng<<8 | nb
 		}
@@ -274,4 +274,3 @@ func iconDebug() string {
 	}
 	return out
 }
-

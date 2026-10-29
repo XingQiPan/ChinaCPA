@@ -59,7 +59,7 @@ type notifyIconData struct {
 var (
 	shellNotifyIcon = shell32.NewProc("Shell_NotifyIconW")
 	// 通知去重：同一个环在接近上限后只弹一次，直到它显著变化
-	lastAlertKey string
+	lastAlertKey  string
 	lastAlertFrac float64
 )
 

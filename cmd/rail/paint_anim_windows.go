@@ -20,10 +20,10 @@ import (
 
 const (
 	// 窗口时钟弧：环外 3pt 间隙、2pt 线宽（Pulse 的 clockGap / clockLineWidth）
-	clockGap      = 3.0
-	clockLine     = 2.0
+	clockGap  = 3.0
+	clockLine = 2.0
 	// 第二限制环：26pt 直径、2.5pt 线宽（DockLayout.secondRingDiameter）
-	secondRingDia = 26.0
+	secondRingDia  = 26.0
 	secondRingLine = 2.5
 	// 刷新扫描弧占整圈的比例与活动标记的比例
 	refreshSweep = 0.16
