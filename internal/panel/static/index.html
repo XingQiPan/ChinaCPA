@@ -1062,6 +1062,13 @@ section h2{letter-spacing:0.04em !important}
         <div class="view-status">各平台原生模型库与基准计价倍率</div>
       </div>
       <section>
+        <div class="hint" style="margin-bottom:8px">输入<b>对外模型名</b>（如 <code>deepseek-v4.1-flash</code>），按历史请求用量估算各渠道单次请求消耗；匹配到发布单价时另给金额估算。</div>
+        <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+          <input id="estModel" placeholder="输入模型名估算…" style="flex:1;min-width:220px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg)"/>
+          <button class="btn sm" onclick="runEstimate()">估算</button>
+          <span class="mini" style="opacity:.6">近 <select id="estDays" style="background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px"><option value="7">7</option><option value="30">30</option><option value="90">90</option><option value="0" selected>全部</option></select> 天</span>
+        </div>
+        <div id="estResult" style="margin-bottom:16px"></div>
         <h2>各平台模型 · 计价倍率
           <span style="display:flex;gap:10px;align-items:center;font-weight:400;text-transform:none;letter-spacing:0">
             <span class="h2-extra" id="libHint"></span>
@@ -2283,6 +2290,35 @@ async function saveModelEditor(){
 }
 
 /* ── 各平台模型倍率 ───────────────────── */
+async function runEstimate(){
+  const model=$('#estModel').value.trim();
+  const days=$('#estDays').value||'0';
+  const box=$('#estResult');
+  if(!model){toast('请先输入模型名',false);return}
+  box.innerHTML='<span class="spin"></span> 估算中…';
+  try{
+    const r=await api('/api/estimate?model='+encodeURIComponent(model)+'&days='+days);
+    const items=r.items||[];
+    if(!items.length){box.innerHTML='<div class="status-line">该模型暂无历史请求数据，先用几次再回来估算。</div>';return}
+    const prov=(x)=>(PROV_NAMES[x]||x);
+    const avgT=t=>(t==null||isNaN(t))?'—':(Math.round(Number(t)*10)/10).toString();
+    const cleanM=m=>{const i=m.indexOf(':');return i>0?m.slice(i+1):m};
+    // 每百万 token 三档积分当量
+    const unit=(v)=>(v==null||isNaN(v))?'—':(Math.round(Number(v)*100)/100).toString();
+    const head=[];head.push(`<tr><th>渠道</th><th>原生倍率</th><th>输入积分/1M</th><th>输出积分/1M</th><th>缓存积分/1M</th><th>请求数</th></tr>`);
+    box.innerHTML=`<table class="tblwrap" style="width:100%"><thead>${head.join('')}</thead><tbody>${
+      items.map((it,i)=>{
+        const cr=it.credits||'—';
+        return `<tr style="--r:${i}">
+          <td><b>${prov(esc(it.provider))}</b><div class="mini" title="平均 输入${avgT(it.avg_prompt)} 输出${avgT(it.avg_completion)} 总${avgT(it.avg_total)} 缓存${avgT(it.avg_cache)}">${esc(cleanM(it.model))}</div></td>
+          <td>${esc(cr)}</td>
+          <td>${unit(it.credit_per_m_in)}</td><td>${unit(it.credit_per_m_out)}</td><td>${unit(it.credit_per_m_cache)}</td>
+          <td>${fmt(it.requests)}</td>
+        </tr>`;
+      }).join('')}</tbody></table>
+      <div class="mini" style="margin-top:6px;opacity:.6">以「每百万 token」计；积分为<b>相对当量</b>（input=1 为基准，输出/缓存按其官方单价比例），渠道倍率缩放——用于跨渠道横向比价。历史平均 token 悬停模型名可见。共 ${fmt(r.total_requests)} 次请求。</div>`;
+  }catch(e){box.innerHTML='<div class="status-line err">估算失败：'+esc(e.message||e)+'</div>'}
+}
 async function loadModels(force){
   try{
     MODELS=await api('/api/models'+(force?'?refresh=1':''));

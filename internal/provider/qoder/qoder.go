@@ -719,7 +719,12 @@ func (p *Provider) Checkin(ctx context.Context, a *model.Account) (*model.Checki
 		if claimed > 0 {
 			return &model.CheckinResult{OK: true, Already: true, Message: "今日已签到"}, nil
 		}
-		return &model.CheckinResult{OK: false, Message: "暂无可领取的签到活动"}, nil
+		if len(items) > 0 {
+			// 上游有活动但均为浏览类（VIEW_DETAILS，如社区集结/订阅优惠），非一键领取
+			return &model.CheckinResult{OK: false,
+				Message: fmt.Sprintf("暂无可领取的签到活动（上游 %d 个活动均非领取类）", len(items))}, nil
+		}
+		return &model.CheckinResult{OK: false, Message: "上游当前没有进行中的签到活动"}, nil
 	}
 	okCount := 0
 	for _, c := range items {

@@ -296,6 +296,97 @@ func (d *DB) DeleteBefore(cutoffSec int64) (int, error) {
 	return removed, err
 }
 
+// ChannelAgg 按「对外模型 × 实际渠道」聚合成功的请求用量与均值。
+type ChannelAgg struct {
+	Model            string  `json:"model"`
+	Provider         string  `json:"provider"` // 实际处理渠道（如 qwenwork / trae）
+	Account          string  `json:"account"`
+	Requests         int64   `json:"requests"`
+	AvgPrompt        float64 `json:"avg_prompt"`
+	AvgCompletion    float64 `json:"avg_completion"`
+	AvgTotal         float64 `json:"avg_total"`
+	AvgCache         float64 `json:"avg_cache"`
+	SumPrompt        int64   `json:"sum_prompt"`
+	SumCompletion    int64   `json:"sum_completion"`
+	SumCache         int64   `json:"sum_cache"`
+}
+
+// AggregateChannels 按对外模型名过滤（模糊，空=全部），聚合所有成功请求，
+// 输出按 provider+model(+account) 分组的用量均值。limit<=0 表示不过滤账号数。
+// atAfter 可选：仅统计指定时间之后的请求（Unix 秒，0=全部）。
+func (d *DB) AggregateChannels(model string, atAfter int64) []ChannelAgg {
+	type acc struct {
+		prompt, complete, cache int64
+		n                       int64
+	}
+	orders := []string{} // 保持首次出现顺序
+	has := map[string]bool{}
+	groups := map[string]*acc{}
+	filter := strings.ToLower(strings.TrimSpace(model))
+	err := d.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bucketName).Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			ts := int64(binary.BigEndian.Uint64(k) / 1e9)
+			if atAfter > 0 && ts < atAfter {
+				continue
+			}
+			var e Entry
+			if json.Unmarshal(v, &e) != nil || !e.OK {
+				continue
+			}
+			if filter != "" && !strings.Contains(strings.ToLower(e.Model), filter) {
+				continue
+			}
+			if e.PromptTokens <= 0 && e.CompletionTokens <= 0 {
+				continue // 无 token 用量（如失败/0 消耗）不计入均值
+			}
+			key := e.Provider + "|" + e.Model
+			if !has[key] {
+				has[key] = true
+				orders = append(orders, key)
+				groups[key] = &acc{}
+			}
+			groups[key].prompt += e.PromptTokens
+			groups[key].complete += e.CompletionTokens
+			groups[key].cache += e.CacheTokens
+			groups[key].n++
+		}
+		return nil
+	})
+	if err != nil {
+		return nil
+	}
+	out := make([]ChannelAgg, 0, len(orders))
+	for _, key := range orders {
+		g := groups[key]
+		pid, mname := splitAggKey(key)
+		if g.n == 0 {
+			continue
+		}
+		out = append(out, ChannelAgg{
+			Model:         mname,
+			Provider:      pid,
+			Requests:      g.n,
+			AvgPrompt:     float64(g.prompt) / float64(g.n),
+			AvgCompletion: float64(g.complete) / float64(g.n),
+			AvgTotal:      float64(g.prompt+g.complete) / float64(g.n),
+			AvgCache:      float64(g.cache) / float64(g.n),
+			SumPrompt:     g.prompt,
+			SumCompletion: g.complete,
+			SumCache:      g.cache,
+		})
+	}
+	return out
+}
+
+func splitAggKey(key string) (string, string) {
+	i := strings.IndexByte(key, '|')
+	if i < 0 {
+		return key, ""
+	}
+	return key[:i], key[i+1:]
+}
+
 // migrateJSONL 一次性导入历史 requests-*.jsonl（仅当库为空时）。
 func (d *DB) migrateJSONL(dir string) {
 	var total int

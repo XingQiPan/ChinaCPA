@@ -19,10 +19,11 @@ import (
 // 冷却是软性的：全部账号都在冷却时仍会尝试（避免冷却窗口内请求被硬拒），
 // 但 auth 冷却时长远大于其他类型，配合 NeedsRelogin 标记停用失效账号。
 const (
-	rateCooldown  = 5 * time.Second  // 软限流
-	upstreamCool  = 5 * time.Second  // 上游故障
-	quotaCooldown = 30 * time.Second // 配额耗尽
-	authCooldown  = 30 * time.Minute // 凭证失效（账号将被标记需重新登录）
+	rateCooldown    = 5 * time.Second  // 软限流
+	rate429Cooldown = 20 * time.Second // HTTP 429：上游限流窗口通常远长于软限流，避免连续请求反复撞同一账号
+	upstreamCool    = 5 * time.Second  // 上游故障
+	quotaCooldown   = 30 * time.Second // 配额耗尽
+	authCooldown    = 30 * time.Minute // 凭证失效（账号将被标记需重新登录）
 )
 
 // coolKey 冷却键：model 为空 = 账号级冷却（如 token 刷新失败），对该账号全部模型生效。
@@ -402,6 +403,10 @@ func (p *Pool) MarkError(a *model.Account, modelName string, err error) {
 	switch pe.Kind {
 	case provider.ErrRate:
 		d = rateCooldown
+		if pe.Status == 429 {
+			// 明确的 HTTP 429：用更长冷却对齐上游限流窗口
+			d = rate429Cooldown
+		}
 	case provider.ErrQuota:
 		d = quotaCooldown
 	case provider.ErrUpstream:

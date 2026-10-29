@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -105,6 +107,7 @@ func (p *Panel) Register(mux *http.ServeMux, gw *gateway.Gateway) {
 	mux.HandleFunc("/api/publish", p.authed(p.handlePublish))
 	mux.HandleFunc("/api/requests", p.authed(p.handleRequests))
 	mux.HandleFunc("/api/stream/events", p.authed(p.handleStreamEvents))
+	mux.HandleFunc("/api/estimate", p.authed(p.handleEstimate))
 }
 
 // ── 面板鉴权 ─────────────────────────────────────────────
@@ -980,6 +983,144 @@ func (p *Panel) handleRequests(w http.ResponseWriter, r *http.Request) {
 		"stats":   stats,
 		"query":   map[string]any{"range": r.URL.Query().Get("range"), "limit": limit, "offset": offset, "total": stats.Total},
 	})
+}
+
+// ── 估价：模型 × 渠道的每百万 token 积分估算 ─────────────
+
+// estimateItem 单个渠道的估算结果。
+type estimateItem struct {
+	Provider string `json:"provider"` // 实际渠道名
+	Model    string `json:"model"`    // 上游真实模型
+	Requests int64  `json:"requests"` // 历史成功请求数（样本量参考）
+	// 历史平均 token 用量（用于展示样本分布，非估算主体）
+	AvgPrompt     float64 `json:"avg_prompt"`
+	AvgCompletion float64 `json:"avg_completion"`
+	AvgTotal      float64 `json:"avg_total"`
+	AvgCache      float64 `json:"avg_cache"`
+	// 原生倍率原文（如 "0.1x" / "免费" / "3x"），来源=各平台模型目录 credits 字段
+	Credits string `json:"credits,omitempty"`
+	// 每百万 token 的积分估算（相对当量）：输入/输出/缓存各一档。
+	// 以 input=1 为基准，输出/缓存按其官方单价比例，再乘该渠道原生倍率。
+	// 仅用于跨渠道横向比较相对消耗；保留两位小数避免小额缓存档被取整成 0。
+	IM float64 `json:"credit_per_m_in"`    // 输入积分当量 / 每百万 token
+	OM float64 `json:"credit_per_m_out"`   // 输出积分当量 / 每百万 token
+	CM float64 `json:"credit_per_m_cache"` // 缓存积分当量 / 每百万 token
+}
+
+// parseCreditsFactor 解析 credits 倍率原文为数值。
+// 支持 "0.1x" / "3x" / "x0.11" / "1x"（x 在前或后）及 "免费"/"free"。
+func parseCreditsFactor(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	low := strings.ToLower(s)
+	if strings.Contains(low, "免费") || strings.Contains(low, "free") {
+		return 0, true
+	}
+	// 去 x 前缀 / 后缀
+	trimmed := strings.TrimPrefix(s, "x")
+	trimmed = strings.TrimPrefix(trimmed, "X")
+	trimmed = strings.TrimSuffix(trimmed, "x")
+	trimmed = strings.TrimSuffix(trimmed, "X")
+	f, err := strconv.ParseFloat(strings.TrimSpace(trimmed), 64)
+	if err != nil {
+		return 0, false
+	}
+	return f, true
+}
+
+// handleEstimate 输入的对外模型名 → 各渠道每百万 token 积分估算。
+// GET /api/estimate?model=xxx（model 可空=返回全部有历史数据的渠道）。
+// 每百万 token 积分 = 发布模型单价比例(输入/输出/缓存三档) × 渠道原生倍率。
+// 无发布单价时退化为：输入=1、输出=按常见比例 4、缓存=0.1 的基准 × 渠道倍率。
+func (p *Panel) handleEstimate(w http.ResponseWriter, r *http.Request) {
+	model := r.URL.Query().Get("model")
+	atAfter := int64(0)
+	// 支持 ?days=N 只统计最近 N 天
+	if ds := r.URL.Query().Get("days"); ds != "" {
+		if n, err := strconv.Atoi(ds); err == nil && n > 0 {
+			atAfter = time.Now().Add(-time.Duration(n) * 24 * time.Hour).Unix()
+		}
+	}
+	aggs := p.rlog.AggregateChannels(model, atAfter)
+
+	// 发布单价（对外名 → 单价）
+	pubP := map[string]pubmodel.Pricing{}
+	for k, v := range p.pub.PricingMap() {
+		pubP[strings.ToLower(k)] = v
+	}
+	// 渠道 → credits 倍率（全平台模型目录）
+	creditsMap := map[string]string{}
+	if all, err := p.pool.AllModels(r.Context()); err == nil {
+		for pid, ms := range all {
+			for _, m := range ms {
+				if m.Credits != "" {
+					creditsMap[strings.ToLower(pid+"|"+m.ID)] = m.Credits
+				}
+			}
+		}
+	}
+
+	// 命中发布模型的单价（若 model 名精确匹配到发布模型）
+	var pubPrice *pubmodel.Pricing
+	if model != "" {
+		if m, ok := p.pub.Lookup(model); ok && m.Pricing != nil {
+			pubPrice = m.Pricing
+		}
+	}
+	resp := struct {
+		Model   string         `json:"model"`
+		HasPub  bool           `json:"has_pub"`
+		Unit    string         `json:"unit"`
+		Items   []estimateItem `json:"items"`
+		Total   int64          `json:"total_requests"`
+	}{Model: model, Unit: "积分当量/1M tokens", Items: []estimateItem{}}
+	for _, a := range aggs {
+		it := estimateItem{
+			Provider: a.Provider, Model: a.Model, Requests: a.Requests,
+			AvgPrompt: a.AvgPrompt, AvgCompletion: a.AvgCompletion,
+			AvgTotal: a.AvgTotal, AvgCache: a.AvgCache,
+			Credits: creditsMap[strings.ToLower(a.Provider+"|"+a.Model)],
+		}
+		factor, ok := parseCreditsFactor(it.Credits)
+		if !ok {
+			factor = 1 // 无明确倍率时按基准 1 估
+		}
+		im, om, cm := millionCreditBase(pubPrice)
+		it.IM = round2(im * factor)
+		it.OM = round2(om * factor)
+		it.CM = round2(cm * factor)
+		resp.Items = append(resp.Items, it)
+		resp.Total += a.Requests
+	}
+	if pubPrice != nil {
+		resp.HasPub = true
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// millionCreditBase 每百万 token 的基准积分（输入/输出/缓存三档），以 input=1 归一。
+// 有发布单价时按 input:output:cache 的 $/1M 相对比例；无则用常见默认比例输出4、缓存0.1。
+func millionCreditBase(p *pubmodel.Pricing) (im, om, cm float64) {
+	if p == nil || p.Input <= 0 {
+		return 1, 4, 0.1 // 无单价默认：输入1、输出4、缓存0.1
+	}
+	base := p.Input
+	im = 1.0
+	om = p.Output / base
+	if om <= 0 {
+		om = 4.0 // 缺省输出价按输入的4倍
+	}
+	cm = p.Cache / base
+	if cm <= 0 {
+		cm = 0.1 // 缺省缓存价按输入的0.1
+	}
+	return im, om, cm
+}
+
+func round2(v float64) float64 {
+	return math.Round(v*100) / 100
 }
 
 // ── 工具 ─────────────────────────────────────────────────
