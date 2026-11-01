@@ -1,8 +1,8 @@
 # ChinaCPA 🇨🇳 国产大模型反代网关
 
-> ⚠️ **本项目仅供个人学习研究使用**，请勿用于任何商业用途或违反各平台服务条款的场景。
+> **开源协议：[MIT](LICENSE)** —— 可自由使用、修改、分发与商业应用，保留版权声明即可。
 >
-> 本仓库为 [XingQiPan/ChinaCPA](https://github.com/XingQiPan/ChinaCPA) 的**二创版本**（个人 fork 持续开发），详见文末「参考」。
+> ⚠️ **免责提示**：本项目通过接口逆向纳管各平台账号，请在使用前自行确认符合目标平台的服务条款。软件按「现状」提供、不附带任何担保，使用者自行承担全部风险与后果（详见 [LICENSE](LICENSE) 与文末「注意」）。
 >
 > 一站式纳管多家国产 AI 平台账号，自动签到攒积分、自动刷新额度、自动统计计费，
 > 一个 OpenAI 兼容接口随便调 —— **无需下载任何官方客户端**。
@@ -27,6 +27,7 @@
 
 ## ✨ 功能
 
+- **开源 · MIT**：可自由使用、修改、分发与商业应用（保留版权声明即可），欢迎 [参与贡献](CONTRIBUTING.md)
 - **凭证即用**：面板 OAuth 授权 / 扫码 / PAT / refreshToken / Cookie 多种纳管方式，不需要安装官方 IDE/CLI
 - **六大平台**：WorkBuddy（CN/国际）、Qwen、Trae（CN/国际）、Qoder（CN/国际）、千问办公、豆包，模型前缀 `workbuddy:` `workbuddy-intl:` `qwen:` `trae:` `qoder:` `qwenwork:` `doubao:`
 - **豆包文 / 图 / 视频**：App 扫码自动回调纳管（字节 passport 协议）；`doubao-chat` 网页助手对话（OpenAI 兼容流式）、Seedream 图片生成（OpenAI Images 协议）、Seedance 视频生成（火山方舟 Ark 异步任务协议，自动解析无水印原片）
@@ -328,16 +329,14 @@ internal/
 
 ## ⚠️ 注意
 
-- **本项目仅限个人学习研究使用**：接口逆向、账号纳管、额度反代均为技术探索性质，请勿用于商业用途、转售分发或任何违反各平台服务条款的场景；使用者需自行承担全部风险与后果
+- **免责**：接口逆向、账号纳管、额度反代均为技术探索，请自行确认符合目标平台服务条款；软件按「现状」提供、不附带任何担保，使用者自行承担全部风险与后果
 - 上游风控收紧时对应通道可能失效；各平台凭证即金钱：`data/` 目录请妥善保管，不要外传
 - WorkBuddy 刷新 token 有防重放（12153），本工具已做单账号串行刷新；多进程同时跑同一 data 目录有风险
 - Trae 登录回调要求面板与浏览器同机（127.0.0.1 回调）或局域网可达；服务器部署时可用「粘贴凭证」方式纳管
 
 ## 🙏 参考
 
-本仓库为 [XingQiPan/ChinaCPA](https://github.com/XingQiPan/ChinaCPA) 的**二创（衍生）版本**，在原项目基础上继续开发与改造（面板视觉升级、风控闸门退避重试、服务密钥热更换、用量范围查询、请求审计聚合等）。原仓库及全部上游出处致谢如下：
-
-接口口径来自以下开源项目的实测成果：
+本项目在社区开源成果的基础上开发。接口口径来自以下项目的实测成果：
 
 - [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（WorkBuddy 全套）
 - [connectedGraph/trae2api-web](https://github.com/connectedGraph/trae2api-web)（Trae SOLO 通道）
@@ -350,4 +349,4 @@ internal/
 
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 xingqipan
