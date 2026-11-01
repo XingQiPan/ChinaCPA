@@ -286,3 +286,80 @@ func TestAcquireRelease(t *testing.T) {
 		t.Fatalf("过度 release 应保持 0，实际 %d", n)
 	}
 }
+
+// TestChannelHealth 渠道健康标记：连续失败达阈值进入冷却，成功清零，窗口过期自动恢复。
+func TestChannelHealth(t *testing.T) {
+	p, _ := newTestPool(t)
+	// 一次失败：未达阈值，不标记
+	p.MarkChannelResult("wb", "m1", false, "429")
+	if h := p.ChannelHealthAll()["wb|m1"]; h.Fails != 1 || !h.UnhealthyUntil.IsZero() {
+		t.Fatalf("1 次失败不应进入不健康: %+v", h)
+	}
+	// 第二次失败：达阈值 → 不健康
+	p.MarkChannelResult("wb", "m1", false, "429 again")
+	h := p.ChannelHealthAll()["wb|m1"]
+	if h.Fails != 2 || h.UnhealthyUntil.IsZero() {
+		t.Fatalf("2 次失败应进入不健康: %+v", h)
+	}
+	if h.LastErr != "429 again" {
+		t.Fatalf("last_err 记录错误: %+v", h)
+	}
+	// 成功：立即清零恢复
+	p.MarkChannelResult("wb", "m1", true, "")
+	if h, ok := p.ChannelHealthAll()["wb|m1"]; ok {
+		t.Fatalf("成功后应清零: %+v", h)
+	}
+}
+
+// TestOrderChannelsByHealth 健康渠道在前，不健康垫底（稳定分区，不丢弃）。
+func TestOrderChannelsByHealth(t *testing.T) {
+	p, _ := newTestPool(t)
+	chs := []ChannelTarget{
+		{PID: "a", Model: "m"},
+		{PID: "b", Model: "m"},
+		{PID: "c", Model: "m"},
+	}
+	// 标记 b 不健康（2 次失败达阈值）
+	p.MarkChannelResult("b", "m", false, "429")
+	p.MarkChannelResult("b", "m", false, "429")
+	got := p.OrderChannelsByHealth(chs)
+	if got[0].PID != "a" || got[1].PID != "c" || got[2].PID != "b" {
+		t.Fatalf("b 应垫底: %+v", got)
+	}
+	// 全部不健康：维持原序照常尝试
+	for _, pid := range []string{"a", "b", "c"} {
+		p.MarkChannelResult(pid, "m", false, "429")
+		p.MarkChannelResult(pid, "m", false, "429")
+	}
+	got = p.OrderChannelsByHealth(chs)
+	if got[0].PID != "a" || got[1].PID != "b" || got[2].PID != "c" {
+		t.Fatalf("全不健康应维持原序: %+v", got)
+	}
+	// 无失败记录：原样返回
+	p2, _ := newTestPool(t)
+	if got := p2.OrderChannelsByHealth(chs); len(got) != 3 || got[0].PID != "a" {
+		t.Fatalf("无状态应原样返回: %+v", got)
+	}
+}
+
+// TestResolveRouteHealthOrder ResolveRoute 对发布模型渠道套用健康垫底。
+func TestResolveRouteHealthOrder(t *testing.T) {
+	p, _ := newTestPool(t)
+	p.provs = map[string]provider.Provider{"t1": &stubProvider{"t1"}, "t2": &stubProvider{"t2"}}
+	m := testPubManager(t, []*pubmodel.Model{{
+		ID:       "pub",
+		Channels: []pubmodel.Channel{{Provider: "t1", Model: "m"}, {Provider: "t2", Model: "m"}},
+	}})
+	p.published = m
+	// t2 渠道连续失败 → 路由中垫到队尾
+	for i := 0; i < chanFailThreshold; i++ {
+		p.MarkChannelResult("t2", "m", false, "429")
+	}
+	route, err := p.ResolveRoute(context.Background(), "pub")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if route.Channels[0].PID != "t1" || route.Channels[1].PID != "t2" {
+		t.Fatalf("不健康渠道应垫底: %+v", route.Channels)
+	}
+}

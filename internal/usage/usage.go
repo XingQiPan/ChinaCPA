@@ -229,11 +229,10 @@ type DayTotal struct {
 	Calls    int64  `json:"calls,omitempty"`
 }
 
-func (t *Tracker) scanDay(day string) DayTotal {
-	dt := DayTotal{Day: day}
+func (t *Tracker) scanDayInto(day string, add func(Record)) {
 	f, err := os.Open(t.file(day))
 	if err != nil {
-		return dt
+		return
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -243,14 +242,105 @@ func (t *Tracker) scanDay(day string) DayTotal {
 		if json.Unmarshal(sc.Bytes(), &r) != nil {
 			continue
 		}
+		add(r)
+	}
+}
+
+func (t *Tracker) scanDay(day string) DayTotal {
+	dt := DayTotal{Day: day}
+	t.scanDayInto(day, func(r Record) {
 		dt.Requests++
 		dt.Prompt += r.PromptTokens
 		dt.Complete += r.CompletionTokens
 		dt.Total += r.TotalTokens
 		dt.Cache += r.CacheTokens
 		dt.Calls += r.Calls
-	}
+	})
 	return dt
+}
+
+// ModelUsage 单模型区间用量聚合（跨渠道/账号按模型汇总，含估算费用）。
+type ModelUsage struct {
+	Model    string  `json:"model"`
+	Requests int64   `json:"requests"`
+	Prompt   int64   `json:"prompt_tokens"`
+	Complete int64   `json:"completion_tokens"`
+	Total    int64   `json:"total_tokens"`
+	Cache    int64   `json:"cache_tokens"`
+	Calls    int64   `json:"calls,omitempty"`
+	Unit     string  `json:"unit,omitempty"`
+	CostCNY  float64 `json:"cost_cny"`
+}
+
+// ModelsRange 按模型聚合 [fromDay, toDay] 闭区间（格式 2006-01-02）的用量，按总 tokens 降序。
+// 区间内含今日时直接取内存聚合，历史日扫描落盘日志。
+func (t *Tracker) ModelsRange(fromDay, toDay string) []ModelUsage {
+	from, err1 := time.Parse("2006-01-02", fromDay)
+	to, err2 := time.Parse("2006-01-02", toDay)
+	if err1 != nil || err2 != nil || to.Before(from) {
+		return nil
+	}
+	t.mu.Lock()
+	today := t.today
+	t.mu.Unlock()
+
+	out := map[string]*ModelUsage{}
+	add := func(r Record) {
+		a, ok := out[r.Model]
+		if !ok {
+			a = &ModelUsage{Model: r.Model}
+			out[r.Model] = a
+		}
+		a.Requests++
+		a.Prompt += r.PromptTokens
+		a.Complete += r.CompletionTokens
+		a.Total += r.TotalTokens
+		a.Cache += r.CacheTokens
+		a.Calls += r.Calls
+		if a.Unit == "" && r.Unit != "" {
+			a.Unit = r.Unit
+		}
+	}
+	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
+		day := d.Format("2006-01-02")
+		if day == today {
+			for _, a := range t.TodayAgg() {
+				add(Record{
+					Model:            a.Model,
+					PromptTokens:     a.Prompt,
+					CompletionTokens: a.Complete,
+					TotalTokens:      a.Total,
+					CacheTokens:      a.Cache,
+					Calls:            a.Calls,
+					Unit:             a.Unit,
+				})
+			}
+			continue
+		}
+		t.scanDayInto(day, add)
+	}
+	list := make([]ModelUsage, 0, len(out))
+	for _, a := range out {
+		a.CostCNY = t.CostFull(a.Model, a.Prompt, a.Complete, a.Cache, a.Calls, a.Unit)
+		list = append(list, *a)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Total > list[j].Total })
+	return list
+}
+
+// SumModels 汇总按模型聚合条目。
+func SumModels(items []ModelUsage) Totals {
+	var tt Totals
+	for _, it := range items {
+		tt.Requests += it.Requests
+		tt.Prompt += it.Prompt
+		tt.Complete += it.Complete
+		tt.Total += it.Total
+		tt.Cache += it.Cache
+		tt.Calls += it.Calls
+		tt.CostCNY += it.CostCNY
+	}
+	return tt
 }
 
 // ── 计价 ─────────────────────────────────────────────────

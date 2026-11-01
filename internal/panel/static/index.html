@@ -1025,7 +1025,23 @@ section h2{letter-spacing:0.04em !important}
         <div class="view-status" id="usageSub"></div>
       </div>
       <section>
-        <h2>今日用量 · 费用估算</h2>
+        <h2>模型用量 · 按时间筛选 <span class="h2-extra" style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-weight:400">
+          <span class="tabs" id="usageRanges" style="margin-bottom:0">
+            <span class="tab" data-r="today" onclick="setUsageRange('today')">今天</span>
+            <span class="tab" data-r="yesterday" onclick="setUsageRange('yesterday')">昨天</span>
+            <span class="tab" data-r="7d" onclick="setUsageRange('7d')">近 7 天</span>
+            <span class="tab" data-r="30d" onclick="setUsageRange('30d')">近 30 天</span>
+            <span class="tab" data-r="day" onclick="setUsageRange('day')">指定日期</span>
+          </span>
+          <input id="usageDay" type="date" style="padding:4px 8px;font-size:12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)" onchange="onUsageDayChange()">
+        </span></h2>
+        <div class="tblwrap">
+        <table id="usageModelTable">
+          <thead><tr><th>模型</th><th>请求数</th><th>输入 tokens</th><th>缓存命中</th><th>输出 tokens</th><th>合计</th><th>估算费用</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        </div>
+        <h2 style="margin-top:22px">今日明细 · 按渠道与账号 <span class="h2-extra" style="text-transform:none;letter-spacing:0;font-weight:400" id="usageDetailExtra"></span></h2>
         <div class="tblwrap">
         <table id="usageTable">
           <thead><tr><th>模型</th><th>渠道</th><th>请求数</th><th>输入 tokens</th><th>缓存命中</th><th>输出 tokens</th><th>合计</th><th>估算费用</th></tr></thead>
@@ -1229,7 +1245,10 @@ function switchView(v){
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.view===v));
   if(history.hash!==('#'+v))history.replaceState(null,'','#'+v);
   if(v==='requests')loadRequests();
-  if(v==='usage'&&typeof USAGE!=='undefined'&&USAGE)renderUsage(USAGE);
+  if(v==='usage'){
+    if(typeof USAGE!=='undefined'&&USAGE)renderUsage(USAGE);
+    setUsageRange(USAGE_RANGE);
+  }
   if(v==='dash')setTimeout(()=>{ if(typeof updateTopologyWires==='function') updateTopologyWires(); }, 60);
 }
 function initFromHash(){
@@ -1278,7 +1297,10 @@ async function refreshAll(manual){
     }
     loadModels(false);
     if(CUR_VIEW==='requests')loadRequests();
-    if(CUR_VIEW==='usage'&&USAGE)renderUsage(USAGE);
+    if(CUR_VIEW==='usage'){
+      if(USAGE)renderUsage(USAGE);
+      loadUsageModels();
+    }
     if(manual)toast('已刷新');
   }catch(e){if(e.message!=='未登录')console.warn(e)}
 }
@@ -2042,6 +2064,19 @@ function chanStatOf(pubId,ch){
   const m=(PUB.channel_stats||{})[`${(pubId||'').toLowerCase()}|${ch.provider}|${ch.model}`];
   return m||{ok:0,fail:0};
 }
+/* 渠道健康（动态熔断标记）：连续失败进入短冷却，路由自动垫底，恢复后回到原优先级 */
+function chanHealthOf(ch){
+  const h=(PUB.channel_health||{})[`${ch.provider}|${ch.model}`];
+  if(!h||!(h.unhealthy_until&&new Date(h.unhealthy_until).getTime()>Date.now()))return null;
+  return h;
+}
+function chanHealthBadge(ch){
+  const h=chanHealthOf(ch);
+  if(!h)return '';
+  const sec=Math.max(0,Math.round((new Date(h.unhealthy_until).getTime()-Date.now())/1000));
+  const tip=esc((h.last_err||'连续失败').slice(0,120));
+  return `<span class="tag cooldown" title="不健康冷却中（${tip}）：路由已临时垫底，剩 ${sec}s 自动恢复">❄ ${sec}s</span>`;
+}
 function renderChannelStats(){
   const el=$('#chanStats');
   const rows=[];
@@ -2055,7 +2090,7 @@ function renderChannelStats(){
     const rate=total?Math.round(r.st.ok/total*100):0;
     return `<div class="chan-row" style="--i:${i}">
       <span class="name" style="font-family:Consolas,monospace;font-size:12.5px">${esc(r.m.id)}</span>
-      <span><span class="tag ${PROV_TAG[r.ch.provider]||'plain'}">${PROV_NAMES[r.ch.provider]||esc(r.ch.provider)}</span> <span class="mini">${esc(r.ch.model)}</span></span>
+      <span><span class="tag ${PROV_TAG[r.ch.provider]||'plain'}">${PROV_NAMES[r.ch.provider]||esc(r.ch.provider)}</span> <span class="mini">${esc(r.ch.model)}</span> ${chanHealthBadge(r.ch)}</span>
       <span class="nums"><span class="ok">✓ ${fmt(r.st.ok)}</span></span>
       <span class="nums"><span class="fail">✗ ${fmt(r.st.fail)}</span></span>
       <span style="display:flex;align-items:center;gap:10px"><span class="rate-track" style="flex:1"><span class="rate-fill" style="display:block;width:0" data-w="${rate}"></span></span><span class="mini" style="width:44px;text-align:right">${rate}%</span></span>
@@ -2070,6 +2105,58 @@ function renderChannelStats(){
 function hasPrice(model){
   const m=(model||'').toLowerCase();
   return (PUB.models||[]).some(x=>(x.id||'').toLowerCase()===m&&x.pricing&&(x.pricing.input>0||x.pricing.output>0||x.pricing.per_call>0));
+}
+
+/* 用量统计：按模型区间统计 */
+const USAGE_RANGE_NAMES={today:'今天',yesterday:'昨天','7d':'近 7 天','30d':'近 30 天',day:'指定日期'};
+let USAGE_RANGE='today', USAGE_MODELS=null;
+function setUsageRange(r){
+  if(!USAGE_RANGE_NAMES[r])return;
+  USAGE_RANGE=r;
+  document.querySelectorAll('#usageRanges .tab').forEach(t=>t.classList.toggle('active',t.dataset.r===r));
+  $('#usageDay').style.display=r==='day'?'':'none';
+  if(r==='day'&&!$('#usageDay').value)$('#usageDay').value=new Date().toISOString().slice(0,10);
+  loadUsageModels();
+}
+function onUsageDayChange(){ if(USAGE_RANGE==='day')loadUsageModels(); }
+async function loadUsageModels(){
+  if(CUR_VIEW!=='usage')return;
+  try{
+    const q=USAGE_RANGE==='day'?`day=${encodeURIComponent($('#usageDay').value)}`:`range=${USAGE_RANGE}`;
+    const us=await api(`/api/usage?days=7&${q}`);
+    USAGE_MODELS=us;
+    renderUsageModels(us);
+  }catch(e){}
+}
+function renderUsageModels(us){
+  const tb=$('#usageModelTable tbody');
+  const list=(us&&us.models)||[];
+  const range=us&&us.models_range||{};
+  const label=USAGE_RANGE==='day'
+    ?(range.from||'').replaceAll('-','/')||'指定日期'
+    :USAGE_RANGE_NAMES[USAGE_RANGE]||USAGE_RANGE;
+  if(!list.length){
+    tb.innerHTML=`<tr><td colspan="7" class="empty">${esc(label)}暂无模型调用记录</td></tr>`;
+  }else{
+    tb.innerHTML=list.map((u,ri)=>{
+      const cost=hasPrice(u.model)?fmtCNY(u.cost_cny):(u.cost_cny>0?fmtCNY(u.cost_cny):'<span class="muted">未计价</span>');
+      const pt=u.prompt_tokens||0, ct=u.cache_tokens||0;
+      const rate=pt>0?Math.round(ct/pt*100):0;
+      const cin=ct>0
+        ?`<div style="color:var(--green)">缓存 ↓ ${fmt(ct)}<span class="mini">（${rate}%）</span></div>`
+        :'<div class="mini" style="color:var(--faint)">未命中</div>';
+      return `<tr style="--r:${ri}">
+        <td><code>${esc(u.model)}</code></td>
+        <td>${fmt(u.requests)}</td>
+        <td>${fmt(u.prompt_tokens)}</td><td>${cin}</td><td>${fmt(u.completion_tokens)}</td><td><b>${fmt(u.total_tokens)}</b></td>
+        <td style="color:var(--accent)">${cost}</td></tr>`;
+    }).join('');
+  }
+  const t=us&&us.models_total||{};
+  const tpt=t.prompt_tokens||0, tct=t.cache_tokens||0;
+  const crate=tpt>0?Math.round(tct/tpt*100):0;
+  const subEl=$('#usageSub');
+  subEl.textContent=`${label} · 共 ${list.length} 个模型 · 累计调用 ${fmt(t.requests)} 次 ｜ 吞吐量 ${fmt(t.total_tokens)} Tokens ｜ 提示词缓存命中率 ${crate}%（${fmt(tct)}/${fmt(tpt)}） ｜ 折合成本 ${fmtCNY(t.cost_cny)}`;
 }
 
 function renderUsage(us){
@@ -2091,6 +2178,8 @@ function renderUsage(us){
   }).join('');
   const tpt=us.totals?.prompt_tokens||0, tct=us.totals?.cache_tokens||0;
   const crate=tpt>0?Math.round(tct/tpt*100):0;
+  const de=$('#usageDetailExtra');
+  if(de)de.textContent='始终展示今日按渠道/账号拆分，按时间筛选的模型汇总见上方表格';
   $('#usageSub').textContent=`今日累计调用 ${fmt(us.totals?.requests)} 次 ｜ 吞吐量 ${fmt(us.totals?.total_tokens)} Tokens ｜ 提示词缓存命中率 ${crate}%（${fmt(tct)}/${fmt(tpt)}） ｜ 累计折合成本 ${fmtCNY(us.totals?.cost_cny)}`;
   // 7 日柱状图（自适应 flex-track 架构，杜绝塌陷为 0）
   const hist=us.history||[];const max=Math.max(1,...hist.map(h=>h.total_tokens||0));
@@ -2116,7 +2205,7 @@ let LAST_PUB_FP='';
 async function loadPublish(){
   try{
     const next=await api('/api/publish');
-    const fp=JSON.stringify([next.models,next.usd_cny,next.channel_stats]);
+    const fp=JSON.stringify([next.models,next.usd_cny,next.channel_stats,next.channel_health]);
     // 自动轮询下配置未变则不重绘，保留用户编辑中的卡片与滚动位置
     if(fp===LAST_PUB_FP&&document.querySelector('#modelModal.open'))return;
     LAST_PUB_FP=fp;
@@ -2164,8 +2253,9 @@ function renderPublish(){
         const cr=creditsOf(ch.provider,ch.model);
         const st=chanStatOf(m.id,ch);
         const stTxt=(st.ok||st.fail)?`<span class="mini" style="margin-left:auto;font-variant-numeric:tabular-nums"><span style="color:var(--green)">✓${st.ok}</span> <span style="color:var(--red)">✗${st.fail}</span></span>`:'';
+        const hb=chanHealthBadge(ch);
         return `<div class="ch-row"><span class="tag ${PROV_TAG[ch.provider]||'plain'}">${PROV_NAMES[ch.provider]||esc(ch.provider)}</span>
-        <span class="arrow">→</span><span class="m">${esc(ch.model)}</span>${stTxt}${cr?`<span class="mini" style="${(st.ok||st.fail)?'':'margin-left:auto'};color:var(--faint)">${esc(cr)}</span>`:''}</div>`;
+        <span class="arrow">→</span><span class="m">${esc(ch.model)}</span>${hb}${stTxt}${cr?`<span class="mini" style="${(st.ok||st.fail||hb)?'':'margin-left:auto'};color:var(--faint)">${esc(cr)}</span>`:''}</div>`;
       }).join('')}
       </div>
     </div>`;
@@ -2443,7 +2533,7 @@ async function doImport(){
 })();
 // 静默自动数据刷新（页面获焦立即刷新，后台常驻每 25 秒静默轮询，无需手动点击）
 window.addEventListener('focus',()=>{if($('#app').style.display!=='none')refreshAll(false)});
-setInterval(()=>{if($('#app').style.display!=='none'){refreshAll(false);loadPublish()}},25000);
+setInterval(()=>{if($('#app').style.display!=='none'){refreshAll(false);loadPublish();if(CUR_VIEW==='usage')loadUsageModels()}},25000);
 // Apple 规范交互：ESC 键与点击遮罩空白区域优雅关闭弹窗 (Direct Manipulation & Forgiveness)
 window.addEventListener('keydown', e=>{
   if(e.key === 'Escape'){

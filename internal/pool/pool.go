@@ -24,6 +24,10 @@ const (
 	upstreamCool    = 5 * time.Second  // 上游故障
 	quotaCooldown   = 30 * time.Second // 配额耗尽
 	authCooldown    = 30 * time.Minute // 凭证失效（账号将被标记需重新登录）
+
+	chanFailThreshold = 2           // 渠道连续失败轮数达阈值 → 标记不健康
+	chanCoolDown      = 5 * time.Second // 渠道不健康窗口：这类限流是突发性的，短窗口自动恢复
+	chanHealthMax     = 256             // 健康条目上限，顺带清理防无限增长
 )
 
 // coolKey 冷却键：model 为空 = 账号级冷却（如 token 刷新失败），对该账号全部模型生效。
@@ -51,6 +55,9 @@ type Pool struct {
 	// inflight 账号实时负载：provider|uid -> 当前进行中的请求数（路由/面板用）
 	inflightMu sync.Mutex
 	inflight   map[string]int64
+	// chanHealth 渠道级健康标记：pid|model -> 连续失败/不健康截止（路由垫底排序用）
+	chanHealthMu sync.Mutex
+	chanHealth   map[string]*chanHealth
 	// refreshMu 单账号串行刷新（WorkBuddy 有防重放，并发刷新会被拒）
 	refreshMu  sync.Mutex
 	refreshers map[string]*sync.Mutex
@@ -88,6 +95,7 @@ func New(st *store.Store, provs []provider.Provider) (*Pool, error) {
 		sticky:       map[string]*stickyEntry{},
 		rr:           map[string]uint64{},
 		inflight:     map[string]int64{},
+		chanHealth:   map[string]*chanHealth{},
 		refreshers:   map[string]*sync.Mutex{},
 		modelAliases: map[string]string{},
 		models:       map[string]*modelCache{},
@@ -366,6 +374,99 @@ func (p *Pool) InflightAll() map[string]int64 {
 	return out
 }
 
+// chanHealth 渠道级健康条目：与账号级 cooldown 同哲学——只是排序信号（软性），
+// 不健康渠道被垫底而非丢弃，全部不健康时维持原序照常尝试。
+type chanHealth struct {
+	fails   int       // 连续失败轮数（一次渠道尝试 = 该渠道内全部账号各试一轮），成功即清零
+	until   time.Time // 不健康截止时刻（零值 = 健康）
+	lastErr string    // 最近一次失败摘要（面板展示）
+}
+
+func chanHealthKey(pid, model string) string { return pid + "|" + model }
+
+// MarkChannelResult 渠道级成败上报：连续失败达阈值进入短冷却（不健康），
+// 成功立即清零恢复。failedReason 仅在失败时用于面板展示。
+func (p *Pool) MarkChannelResult(pid, model string, ok bool, failedReason string) {
+	key := chanHealthKey(pid, model)
+	now := time.Now()
+	p.chanHealthMu.Lock()
+	defer p.chanHealthMu.Unlock()
+	if ok {
+		delete(p.chanHealth, key)
+		return
+	}
+	h := p.chanHealth[key]
+	if h == nil {
+		h = &chanHealth{}
+		p.chanHealth[key] = h
+	}
+	h.fails++
+	h.lastErr = failedReason
+	if h.fails >= chanFailThreshold {
+		h.until = now.Add(chanCoolDown)
+	}
+	// 顺带清理已恢复的条目（不健康窗口过完即重置，下次失败从头计数），防 map 无限增长
+	if len(p.chanHealth) > chanHealthMax {
+		for k, e := range p.chanHealth {
+			if !e.until.After(now) {
+				delete(p.chanHealth, k)
+			}
+		}
+	}
+}
+
+// unhealthy 是否处于不健康窗口内。
+func (h *chanHealth) unhealthy(now time.Time) bool {
+	return h.until.After(now)
+}
+
+// OrderChannelsByHealth 按渠道健康稳定分区：健康的在前（保持原相对顺序），
+// 不健康的垫底——让请求先打健康渠道，冷却中的渠道只做最后兜底。
+func (p *Pool) OrderChannelsByHealth(chs []ChannelTarget) []ChannelTarget {
+	if len(chs) <= 1 {
+		return chs
+	}
+	now := time.Now()
+	p.chanHealthMu.Lock()
+	defer p.chanHealthMu.Unlock()
+	healthy := make([]ChannelTarget, 0, len(chs))
+	degraded := make([]ChannelTarget, 0, len(chs))
+	for _, ch := range chs {
+		h := p.chanHealth[chanHealthKey(ch.PID, ch.Model)]
+		if h != nil && h.unhealthy(now) {
+			degraded = append(degraded, ch)
+		} else {
+			healthy = append(healthy, ch)
+		}
+	}
+	if len(degraded) == 0 {
+		return chs
+	}
+	return append(healthy, degraded...)
+}
+
+// ChannelHealthAll 渠道健康快照（面板展示用）：key = pid|model。
+func (p *Pool) ChannelHealthAll() map[string]ChannelHealth {
+	now := time.Now()
+	p.chanHealthMu.Lock()
+	defer p.chanHealthMu.Unlock()
+	out := make(map[string]ChannelHealth, len(p.chanHealth))
+	for k, h := range p.chanHealth {
+		if h.fails == 0 && !h.unhealthy(now) {
+			continue
+		}
+		out[k] = ChannelHealth{Fails: h.fails, UnhealthyUntil: h.until, LastErr: h.lastErr}
+	}
+	return out
+}
+
+// ChannelHealth 渠道健康快照条目。
+type ChannelHealth struct {
+	Fails          int       `json:"fails"`           // 连续失败轮数
+	UnhealthyUntil time.Time `json:"unhealthy_until"` // 不健康截止时刻（零值 = 健康）
+	LastErr        string    `json:"last_err"`        // 最近失败摘要
+}
+
 // EnabledAccounts 某 provider 全部启用中的账号（忽略冷却，但排除需重新登录的账号）。
 func (p *Pool) EnabledAccounts(providerID string) []*model.Account {
 	p.mu.RLock()
@@ -621,7 +722,8 @@ func (p *Pool) ResolveRoute(ctx context.Context, name string) (*Route, error) {
 				chs = p.rotateChannels(chs)
 			}
 			// priority 策略：严格按用户配置的优先级排序（如：国内优先，国际兜底）
-			return &Route{Public: mo.ID, Channels: chs, Published: true, Type: mo.Type}, nil
+			// 渠道健康动态垫底：不健康（短冷却中）的渠道排到最后兜底，恢复后自动回到原优先级
+			return &Route{Public: mo.ID, Channels: p.OrderChannelsByHealth(chs), Published: true, Type: mo.Type}, nil
 		}
 	}
 	pid, mname, err := p.ResolveModel(ctx, name)

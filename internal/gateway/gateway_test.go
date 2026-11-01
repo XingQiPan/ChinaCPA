@@ -86,3 +86,41 @@ func TestAggregateContent(t *testing.T) {
 		t.Fatalf("finish 错误: %q", finish)
 	}
 }
+
+// TestRetryableChannelErr 渠道内重试判定：限流/上游错误可重试，
+// 配额/凭证/客户端错误不重试；本轮没试到任何账号（trail 空）也不重试。
+func TestRetryableChannelErr(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   *provider.Error
+		trail string
+		want  bool
+	}{
+		{"429 限流", &provider.Error{Kind: provider.ErrRate, Status: 429}, "a1 ✗429", true},
+		{"软限流", &provider.Error{Kind: provider.ErrRate}, "a1 ✗请求过于频繁", true},
+		{"上游故障", &provider.Error{Kind: provider.ErrUpstream}, "a1 ✗超时", true},
+		{"配额耗尽", &provider.Error{Kind: provider.ErrQuota}, "a1 ✗Billing", false},
+		{"凭证失效", &provider.Error{Kind: provider.ErrAuth}, "a1 ✗401", false},
+		{"客户端错误", &provider.Error{Kind: provider.ErrClient}, "a1 ✗400", false},
+		{"无账号可选", &provider.Error{Kind: provider.ErrUpstream}, "", false},
+		{"无错误", nil, "a1 ✗HTTP 500", false},
+	}
+	for _, c := range cases {
+		if got := retryableChannelErr(c.err, c.trail); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRetryableMediaErr 媒体渠道重试判定：裸 error 归一分类后同 chat 语义。
+func TestRetryableMediaErr(t *testing.T) {
+	if !retryableMediaErr(&provider.Error{Kind: provider.ErrRate, Status: 429}, true) {
+		t.Error("429 且有账号尝试应可重试")
+	}
+	if retryableMediaErr(&provider.Error{Kind: provider.ErrQuota}, true) {
+		t.Error("配额耗尽不应重试")
+	}
+	if retryableMediaErr(&provider.Error{Kind: provider.ErrRate}, false) {
+		t.Error("未试到任何账号不应重试")
+	}
+}

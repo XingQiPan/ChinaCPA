@@ -310,26 +310,46 @@ func (g *Gateway) callRoutedStream(ctx context.Context, w http.ResponseWriter, r
 	var lastStatus int
 	var lastBody []byte
 	var attempts []string
+	aborted := false
 	for _, ch := range route.Channels {
-		st, err, status, respBody, trail := g.tryProviderStream(ctx, ch.PID, ch.Model, body, sessionKey)
-		if st != nil {
-			g.bumpChannel(route, ch, true)
-			st.attempts = append(attempts, reqlog.Attempt(ch.PID, ch.Model, true, trail))
-			return st
-		}
-		g.bumpChannel(route, ch, false)
-		note := ""
-		if err != nil {
-			note = err.Error()
-		}
-		if trail != "" {
-			if note != "" {
-				note += "｜"
+		// 渠道内重试：限流/上游抖动多为瞬时，原地稍候再轮询一轮账号常好过
+		// 立刻换渠道（换渠道 = 换上游 + 前缀缓存失效，代价更高）。
+		for attempt := 1; attempt <= channelRetryLimit; attempt++ {
+			st, err, status, respBody, trail := g.tryProviderStream(ctx, ch.PID, ch.Model, body, sessionKey)
+			if st != nil {
+				g.markChannel(route, ch, true, "")
+				st.attempts = append(attempts, reqlog.Attempt(ch.PID, ch.Model, true, trail))
+				return st
 			}
-			note += trail
+			note := ""
+			if err != nil {
+				note = err.Error()
+			}
+			if trail != "" {
+				if note != "" {
+					note += "｜"
+				}
+				note += trail
+			}
+			g.markChannel(route, ch, false, note)
+			attempts = append(attempts, reqlog.Attempt(ch.PID, ch.Model, false, note))
+			lastErr, lastStatus, lastBody = err, status, respBody
+			if attempt == channelRetryLimit || !retryableChannelErr(err, trail) {
+				break
+			}
+			// 退避等待后再试同渠道；客户端已断开则立即收尾
+			select {
+			case <-ctx.Done():
+				aborted = true
+			case <-time.After(time.Duration(attempt) * channelRetryDelay):
+			}
+			if aborted {
+				break
+			}
 		}
-		attempts = append(attempts, reqlog.Attempt(ch.PID, ch.Model, false, note))
-		lastErr, lastStatus, lastBody = err, status, respBody
+		if aborted {
+			break
+		}
 	}
 	msg := "上游调用失败"
 	if lastErr != nil && lastErr.Error() != "" {
@@ -346,8 +366,53 @@ func (g *Gateway) callRoutedStream(ctx context.Context, w http.ResponseWriter, r
 	return nil
 }
 
-// bumpChannel 发布模型渠道调用计数。
-func (g *Gateway) bumpChannel(route *pool.Route, ch pool.ChannelTarget, ok bool) {
+// 渠道内重试参数：每渠道最多尝试 3 轮账号轮询，第 N 次重试前等 N×500ms（0.5s、1s）。
+const (
+	channelRetryLimit = 3
+	channelRetryDelay = 500 * time.Millisecond
+)
+
+// retryableChannelErr 判断渠道级失败是否值得原地重试：
+// 限流（含 429）与上游抖动重试有意义；凭证失效/配额耗尽（如 Billing daily count
+// exceeded）/客户端错误重试注定失败，立即切下一渠道。
+// trail 为空说明本轮连账号都没选到（无账号/需重新登录），重试也不会变。
+func retryableChannelErr(err *provider.Error, trail string) bool {
+	if trail == "" {
+		return false
+	}
+	if err == nil {
+		return false
+	}
+	switch err.Kind {
+	case provider.ErrRate, provider.ErrUpstream:
+		return true
+	default:
+		return false
+	}
+}
+
+// retryableMediaErr 图片/视频渠道的重试判定：语义同 retryableChannelErr，
+// 但媒体接口的账号轮询返回裸 error（内部已归一为 *provider.Error）。
+// triedAny = 该渠道本轮确有账号被尝试（acct != nil）。
+func retryableMediaErr(err error, triedAny bool) bool {
+	if !triedAny {
+		return false
+	}
+	if err == nil {
+		return false
+	}
+	switch provider.AsError(err).Kind {
+	case provider.ErrRate, provider.ErrUpstream:
+		return true
+	default:
+		return false
+	}
+}
+
+// markChannel 渠道级成败上报：健康标记（路由垫底排序用）对所有请求生效，
+// 发布模型的调用计数仅在 Published 时记录。
+func (g *Gateway) markChannel(route *pool.Route, ch pool.ChannelTarget, ok bool, failedReason string) {
+	g.pool.MarkChannelResult(ch.PID, ch.Model, ok, failedReason)
 	if !route.Published {
 		return
 	}

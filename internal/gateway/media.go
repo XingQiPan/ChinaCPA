@@ -97,20 +97,35 @@ func (g *Gateway) handleImages(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue // 该渠道平台不支持图片生成
 		}
-		res, acct, aerr := g.tryImage(r.Context(), ig, ch, req)
-		if res != nil {
-			g.bumpChannel(route, ch, true)
-			g.pool.MarkSuccess(acct, ch.Model)
-			// 按次计费：生成成功即按张数记账（模型单价走发布模型 per_call）
-			g.recordMedia(route.Public, ch.PID, acct.UID, int64(len(res.URLs)), "images")
-			g.logReqMedia("image", route.Public, ch.PID, acct.UID, true, int64(len(res.URLs)), t0)
-			g.writeImagesResp(w, r, res, req)
-			return
+		// 渠道内重试：限流/上游抖动多为瞬时，稍候再轮询一轮账号（与对话渠道一致）
+		for attempt := 1; attempt <= channelRetryLimit; attempt++ {
+			res, acct, aerr := g.tryImage(r.Context(), ig, ch, req)
+			if res != nil {
+				g.markChannel(route, ch, true, "")
+				g.pool.MarkSuccess(acct, ch.Model)
+				// 按次计费：生成成功即按张数记账（模型单价走发布模型 per_call）
+				g.recordMedia(route.Public, ch.PID, acct.UID, int64(len(res.URLs)), "images")
+				g.logReqMedia("image", route.Public, ch.PID, acct.UID, true, int64(len(res.URLs)), t0)
+				g.writeImagesResp(w, r, res, req)
+				return
+			}
+			// 该渠道失败：记录并重试/尝试下一个渠道（跨渠道失败转移）
+			lastErr, lastAcct = aerr, acct
+			note := ""
+			if aerr != nil {
+				note = aerr.Error()
+			}
+			g.markChannel(route, ch, false, note)
+			g.logReqMedia("image", route.Public, ch.PID, "", false, 0, t0)
+			if attempt == channelRetryLimit || !retryableMediaErr(aerr, acct != nil) {
+				break
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(time.Duration(attempt) * channelRetryDelay):
+			}
 		}
-		// 该渠道失败：记录并继续尝试下一个渠道（跨渠道失败转移）
-		lastErr, lastAcct = aerr, acct
-		g.bumpChannel(route, ch, false)
-		g.logReqMedia("image", route.Public, ch.PID, "", false, 0, t0)
 	}
 	msg := "所选渠道均不支持图片生成（当前仅豆包 Seedream 提供）"
 	if lastErr != nil {
@@ -424,32 +439,47 @@ func (g *Gateway) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
-		handle, acct, cerr := g.tryVideoCreate(r.Context(), vg, ch, prompt, ratio, duration)
-		if cerr != nil {
-			// 该渠道提交失败：记录并尝试下一个渠道（跨渠道失败转移）
-			lastErr = cerr
-			uid := ""
-			if acct != nil {
-				uid = acct.UID
+		// 渠道内重试：限流/上游抖动多为瞬时，稍候再轮询一轮账号（与对话渠道一致）
+		for attempt := 1; attempt <= channelRetryLimit; attempt++ {
+			handle, acct, cerr := g.tryVideoCreate(r.Context(), vg, ch, prompt, ratio, duration)
+			if cerr != nil {
+				// 该渠道提交失败：记录并重试/尝试下一个渠道（跨渠道失败转移）
+				lastErr = cerr
+				uid := ""
+				if acct != nil {
+					uid = acct.UID
+				}
+				note := ""
+				if cerr != nil {
+					note = cerr.Error()
+				}
+				g.markChannel(route, ch, false, note)
+				g.logReqMedia("video", route.Public, ch.PID, uid, false, 0, t0)
+				if attempt == channelRetryLimit || !retryableMediaErr(cerr, acct != nil) {
+					break
+				}
+				select {
+				case <-r.Context().Done():
+					return
+				case <-time.After(time.Duration(attempt) * channelRetryDelay):
+				}
+				continue
 			}
-			g.bumpChannel(route, ch, false)
-			g.logReqMedia("video", route.Public, ch.PID, uid, false, 0, t0)
-			continue
+			if handle == nil {
+				continue
+			}
+			id := newVideoTaskID()
+			t := &videoTask{
+				ID: id, Public: route.Public, PID: ch.PID, AcctUID: acct.UID,
+				Acct: acct, Handle: handle, Prompt: prompt,
+				Status: "running", CreatedAt: time.Now().Unix(), UpdatedAt: time.Now().Unix(),
+			}
+			g.videoTasks.put(t)
+			g.markChannel(route, ch, true, "")
+			go g.pollVideoTask(t)
+			writeJSON(w, http.StatusOK, g.videoTaskView(t, nil))
+			return
 		}
-		if handle == nil {
-			continue
-		}
-		id := newVideoTaskID()
-		t := &videoTask{
-			ID: id, Public: route.Public, PID: ch.PID, AcctUID: acct.UID,
-			Acct: acct, Handle: handle, Prompt: prompt,
-			Status: "running", CreatedAt: time.Now().Unix(), UpdatedAt: time.Now().Unix(),
-		}
-		g.videoTasks.put(t)
-		g.bumpChannel(route, ch, true)
-		go g.pollVideoTask(t)
-		writeJSON(w, http.StatusOK, g.videoTaskView(t, nil))
-		return
 	}
 	msg := "所选渠道均不支持视频生成（当前仅豆包 Seedance 提供）"
 	if lastErr != nil {

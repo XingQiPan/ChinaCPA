@@ -884,16 +884,37 @@ func (p *Panel) handleImport(w http.ResponseWriter, r *http.Request) {
 // ── 用量 ─────────────────────────────────────────────────
 
 func (p *Panel) handleUsage(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	days := 7
 	if d := r.URL.Query().Get("days"); d != "" {
 		if _, err := fmt.Sscanf(d, "%d", &days); err != nil || days < 1 || days > 90 {
 			days = 7
 		}
 	}
+	// 按模型统计区间：range=today|yesterday|7d|30d 或 day=YYYY-MM-DD（某一天），缺省 = 今日
+	fromDay, toDay := now.Format("2006-01-02"), now.Format("2006-01-02")
+	switch r.URL.Query().Get("range") {
+	case "yesterday":
+		fromDay, toDay = todayStart.AddDate(0, 0, -1).Format("2006-01-02"), todayStart.AddDate(0, 0, -1).Format("2006-01-02")
+	case "7d":
+		fromDay = todayStart.AddDate(0, 0, -6).Format("2006-01-02")
+	case "30d":
+		fromDay = todayStart.AddDate(0, 0, -29).Format("2006-01-02")
+	}
+	if d := r.URL.Query().Get("day"); d != "" {
+		if ts, err := time.ParseInLocation("2006-01-02", d, now.Location()); err == nil {
+			fromDay, toDay = ts.Format("2006-01-02"), ts.Format("2006-01-02")
+		}
+	}
+	models := p.usage.ModelsRange(fromDay, toDay)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"history": p.usage.HistoryDays(days),
-		"today":   p.usage.TodayWithCost(),
-		"totals":  usage.Sum(p.usage.TodayWithCost()),
+		"history":      p.usage.HistoryDays(days),
+		"today":        p.usage.TodayWithCost(),
+		"totals":       usage.Sum(p.usage.TodayWithCost()),
+		"models":       models,
+		"models_total": usage.SumModels(models),
+		"models_range": map[string]string{"from": fromDay, "to": toDay},
 	})
 }
 
@@ -911,9 +932,10 @@ func (p *Panel) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		cfg := p.pub.Get()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"models":        cfg.Models,
-			"usd_cny":       cfg.USDCNY,
-			"channel_stats": p.pub.ChannelStats(),
+			"models":         cfg.Models,
+			"usd_cny":        cfg.USDCNY,
+			"channel_stats":  p.pub.ChannelStats(),
+			"channel_health": p.pool.ChannelHealthAll(),
 		})
 		return
 	}
