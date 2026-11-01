@@ -14,7 +14,7 @@
 >
 > 「每日签到」分两类：**接口型**（有真实签到/领取端点：WorkBuddy、Trae、Qoder）和
 > **确认型**（上游无签到接口，发放由登录/服务端触发，本端查钱包/积分余额确认到账，
-> 未到账不算失败、当日自动复查：千问办公；Qwen、豆包无每日积分体系）。
+> 未到账不算失败、当日自动复查：千问办公；Qwen 无每日积分体系）。
 
 | 平台 | 登录方式 | 免费额度 | 每日签到 |
 |---|---|---|---|
@@ -23,7 +23,6 @@
 | **Trae**（字节 SOLO 免费通道，CN/国际） | PKCE 授权码回调 | ide_credits | ✅ 每日 +200 积分 |
 | **Qoder**（阿里，CN qoder.com.cn / 国际 qoder.sh） | 控制台 PAT 导入 | credits（套餐+加购+组织） | ✅ 每日积分活动自动领取 |
 | **千问办公**（阿里 QwenWork，gateway.qwenwork.cn） | 钉钉扫码授权（device-flow） | 积分制（个人/企业池） | ☑ 确认型：每日积分自动确认（登录触发发放，个人版 100~200/天当日有效） |
-| **豆包**（字节，www.doubao.com） | 豆包 App 扫码自动回调 / Cookie 兜底 | 网页通道（文 / 图 / 视频按豆包 App 权益） | —（无签到体系） |
 
 > Trae 2026-10 起切换到 PKCE 授权码登录（客户端 3.3.62），本项目已跟进新流程；旧版 refreshToken 凭证仍可粘贴导入。
 > WorkBuddy 分区：国内版（codebuddy.cn）与国际版（workbuddy.ai）面板各一张卡片，账号、额度、签到、模型完全独立；模型前缀 `workbuddy:` / `workbuddy-intl:`。
@@ -34,10 +33,9 @@
 
 - **开源 · MIT**：可自由使用、修改、分发与商业应用（保留版权声明即可），欢迎 [参与贡献](CONTRIBUTING.md)
 - **凭证即用**：面板 OAuth 授权 / 扫码 / PAT / refreshToken / Cookie 多种纳管方式，不需要安装官方 IDE/CLI
-- **六大平台**：WorkBuddy（CN/国际）、Qwen、Trae（CN/国际）、Qoder（CN/国际）、千问办公、豆包，模型前缀 `workbuddy:` `workbuddy-intl:` `qwen:` `trae:` `qoder:` `qwenwork:` `doubao:`
-- **豆包文 / 图 / 视频**：App 扫码自动回调纳管（字节 passport 协议）；`doubao-chat` 网页助手对话（OpenAI 兼容流式）、Seedream 图片生成（OpenAI Images 协议）、Seedance 视频生成（火山方舟 Ark 异步任务协议，自动解析无水印原片）
-- **自动签到积分**：每日 9 点、21 点自动签到（可配），失败记当日自动重试；WorkBuddy 任务中心自动接受任务+领取奖励。无签到接口的平台（千问办公确认型 / Qwen、豆包无体系）在面板以「说明」标签呈现，不计为失败
-- **额度自动获取**：每 10 分钟自动刷新各账号剩余额度（WorkBuddy 积分 / Trae ide_credits / Qwen 今日剩余次数）；豆包文/图/视频按账号本地日计数，重启不丢
+- **五大平台**：WorkBuddy（CN/国际）、Qwen、Trae（CN/国际）、Qoder（CN/国际）、千问办公，模型前缀 `workbuddy:` `workbuddy-intl:` `qwen:` `trae:` `qoder:` `qwenwork:`
+- **自动签到积分**：每日 9 点、21 点自动签到（可配），失败记当日自动重试；WorkBuddy 任务中心自动接受任务+领取奖励。无签到接口的平台（千问办公确认型 / Qwen 无体系）在面板以「说明」标签呈现，不计为失败
+- **额度自动获取**：每 10 分钟自动刷新各账号剩余额度（WorkBuddy 积分 / Trae ide_credits / Qwen 今日剩余次数），重启不丢
 - **模型发布 · 渠道归组**：面板自定义对外模型 → 多个上游渠道（跨平台），渠道间失败转移 + 可配渠道策略（优先级 / 轮询均衡），渠道内多账号轮询 + 会话黏性；`/v1/models` 只暴露已发布模型（未配置时默认暴露全部内部模型），配置落盘 `data/models.json`
 - **OpenAI 兼容网关**：`/v1/models` + `/v1/chat/completions`（SSE 流式），多账号自动轮询 + 失败转移 + 限流冷却；上游凭证失效自动标记「需重新登录」并停止调度，重新导入即恢复
 - **仪表板统计**：今日/7 日 token 消耗（100M/1B 风格）、请求数、按模型费用估算（发布模型单价优先，对话 $/1M、图片/视频 $/次 → ¥ 自动折算）、剩余额度自动计算
@@ -134,17 +132,6 @@ go build -o chinacpa ./cmd/chinacpa
         { "provider": "workbuddy", "model": "glm-5.3" }
       ]
     },
-    {
-      "id": "my-seedream",
-      "type": "image",
-      "pricing": { "input": 0.02 },
-      "channels": [ { "provider": "doubao", "model": "seedream-5.0-flash" } ]
-    },
-    {
-      "id": "my-seedance",
-      "type": "video",
-      "channels": [ { "provider": "doubao", "model": "seedance-2.5" } ]
-    }
   ]
 }
 ```
@@ -189,54 +176,6 @@ curl http://127.0.0.1:8313/v1/chat/completions \
 模型命名：**`平台:模型`**（`workbuddy:deepseek-v4.1` / `qwen:qwen3-coder-plus` / `trae:glm-5.2`）。
 裸模型名（如 `glm-5.2`）在唯一平台存在时可直接用；重名时接口会提示可用前缀。
 
-### 豆包：语言模型 + 图片生成 + 视频生成
-
-豆包通道基于网页协议（www.doubao.com）。**推荐扫码登录**：面板「添加账号 → 豆包」→
-弹窗直接显示二维码（或打开链接）→ 豆包 App「对话 → ＋ → 扫一扫」→ 手机确认后
-**自动回调纳管**（字节 passport 扫码协议，服务端取 Cookie，无需浏览器）。
-兜底方式：登录 www.doubao.com 后 F12 → Network → 任一请求 → 复制完整 `Cookie:`
-头（需含 `sessionid` 与 `s_v_web_id`）粘贴导入。设备标识（device_id/web_id）自动生成落盘。
-
-**可用模型**：
-
-| 模型 | 类型 | 说明 |
-|---|---|---|
-| `doubao-chat` | 文本 | 网页默认助手（OpenAI 兼容，流式/非流式） |
-| `seedream-5.0-flash` / `seedream-5.0-pro` / `seedream-4.5` / `seedream-4.0` | 图片 | Seedream 网页通道 |
-| `seedance-2.5` / `seedance-2.0` / `seedance-2.0-pro` / `seedance-2.0-fast` / `seedance-2.0-mini` / `seedance-1.0` | 视频 | Seedance 网页通道（seedance-2.5 支持 30s） |
-
-**图片生成**（OpenAI Images 协议，`size` 自动换算为 Seedream 比例，也可直接传 `ratio`）：
-
-```bash
-curl http://127.0.0.1:8318/v1/images/generations \
-  -H "Authorization: Bearer <你的 api_key>" -H "Content-Type: application/json" \
-  -d '{"model":"doubao:seedream-5.0-flash","prompt":"一只猫","size":"2048x2048","n":4}'
-```
-
-**视频生成**（火山方舟 Ark 异步任务协议，`/api/v3/contents/generations/tasks`；也支持 `POST /v1/videos` 别名。
-提示词支持 Ark 风格参数 `--ratio 16:9 --duration 5 --resolution 720p`；任务在内存中跟踪，服务重启后进行中任务会丢失）：
-
-```bash
-# 创建任务
-curl http://127.0.0.1:8318/api/v3/contents/generations/tasks \
-  -H "Authorization: Bearer <你的 api_key>" -H "Content-Type: application/json" \
-  -d '{"model":"doubao:seedance-2.5","content":[{"type":"text","text":"夕阳下奔跑的少年 --ratio 16:9 --duration 5"}]}'
-# → {"id":"cgt-xxxx...","status":"running",...}
-
-# 轮询（succeeded 后 content.video_url 即结果；优先解析素材库无水印原片）
-curl http://127.0.0.1:8318/api/v3/contents/generations/tasks/cgt-xxxx... \
-  -H "Authorization: Bearer <你的 api_key>"
-```
-
-> 图生视频（image_url 参考图）暂不支持（上游附件上传通道未接入），当前仅文生视频。
-> 协议依据 Doora v0.8.2 逆向结论（提交 + 轮询 + 自动确认轮 + 无水印选优），上游改版时字段可能变动。
-
-**生成额度（面板「生成额度」页）**：豆包网页端无公开额度接口，采用本地按账号日计数：
-图片按张、视频按条、对话按次（提交成功即计），跨日自动清零；达到每日上限的账号自动
-冷却并切到下一个豆包账号（多账号分摊额度）。上限在 `config.json`
-`doubao.image_daily_limit` / `doubao.video_daily_limit` 配置（默认 50 / 10），
-面板展示每个账号的进度条与按模型消耗明细。
-
 ## ⚙️ 配置（config.json）
 
 ```jsonc
@@ -253,7 +192,6 @@ curl http://127.0.0.1:8318/api/v3/contents/generations/tasks/cgt-xxxx... \
     "token_refresh_hours": [3]          // token 保活刷新时刻
   },
   "qwen": { "daily_request_limit": 2000 },
-  "doubao": { "image_daily_limit": 50, "video_daily_limit": 10 },  // 每账号每日生成上限（本地计数，面板「生成额度」展示）
   "pricing": {
     "file": "",                         // 自定义单价表（缺省 data/pricing.json）
     "usd_cny": 7.1                      // 费用估算汇率
@@ -331,7 +269,6 @@ internal/
 │   ├── trae/           字节：授权回调、ExchangeToken、签到、额度、SOLO SSE→OpenAI
 │   ├── qoder/          阿里 Qoder：PAT 导入、额度、对话
 │   ├── qwenwork/       千问办公：钉钉扫码、积分池、对话
-│   └── doubao/         豆包网页协议：Cookie 导入、对话、Seedream 图片、Seedance 视频
 ├── pool/               多账号池：轮询、冷却、模型路由、风控闸门退避重试
 ├── pubmodel/           发布模型配置（对外模型 → 多渠道 + 单价）
 ├── scheduler/          定时：签到、任务、额度刷新、保活

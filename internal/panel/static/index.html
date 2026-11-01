@@ -965,7 +965,6 @@ section h2{letter-spacing:0.04em !important}
       <div class="side-group">
         <div class="side-group-label">账号 <span class="cnt" id="navAcctCnt">0</span></div>
         <a class="nav-item" data-view="accounts" onclick="switchView('accounts')"><span class="ico"><svg class="ui"><use href="#i-users"/></svg></span>账号池</a>
-        <a class="nav-item" data-view="genquota" onclick="switchView('genquota')"><span class="ico"><svg class="ui"><use href="#i-pie"/></svg></span>生成额度</a>
       </div>
       <div class="side-group">
         <div class="side-group-label">用量 <span class="cnt" id="navUsageCnt"></span></div>
@@ -1197,28 +1196,8 @@ section h2{letter-spacing:0.04em !important}
         </div>
         <div class="empty" id="acctEmpty" style="display:none">
           当前账号池暂未接入任何服务商凭据，请点击右上角「添加账号」接入上游实例<br>
-          <span class="mini" style="color:var(--faint)">支持 WorkBuddy / Qwen / Trae / Qoder / 千问办公 / 豆包 等平台，接入后自动执行凭据托管与额度同步</span>
+          <span class="mini" style="color:var(--faint)">支持 WorkBuddy / Qwen / Trae / Qoder / 千问办公 等平台，接入后自动执行凭据托管与额度同步</span>
         </div>
-      </section>
-    </div>
-
-    <!-- 豆包生成额度 -->
-    <div class="view" id="view-genquota">
-      <div class="view-head">
-        <div class="view-title">豆包生成额度</div>
-        <div class="view-status" id="gqCount"></div>
-      </div>
-      <section>
-        <div class="hint" style="margin-bottom:16px;font-size:13.5px;line-height:2">因豆包服务商未开放公开配额查询端点，本模块采用<b>本地实例级日用量审计</b>机制（按提交成功事件原子计数：图片以张计、视频以条计、文本以次计；跨日自动归零）。当单一实例达到限额阈值时，网关将自动置入冷却隔离并触发故障转移至备用实例。每日阈值可在 <code>config.json</code> 中的 <code>doubao.image_daily_limit</code> 及 <code>doubao.video_daily_limit</code> 进行配置。</div>
-        <div class="tblwrap">
-        <table id="genQuotaTable">
-          <thead><tr>
-            <th>账号</th><th>图片（张/日）</th><th>视频（条/日）</th><th>对话（次/日）</th><th>模型明细</th><th>状态</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-        </div>
-        <div class="empty" id="gqEmpty" style="display:none">暂无已接入的豆包实例：请在「添加账号」中完成移动端扫码鉴权，接入后系统将自动呈现各实例每日多模态配额消耗走势</div>
       </section>
     </div>
 
@@ -1286,7 +1265,7 @@ section h2{letter-spacing:0.04em !important}
             <button class="btn sm accent" onclick="openModelEditor(-1)"><svg class="ui"><use href="#i-plus"/></svg> 创建路由模型</button>
           </span>
         </h2>
-        <div class="hint" style="margin-bottom:16px;font-size:13.5px;line-height:2">网关端点仅对外暴露在此配置的模型定义：<b>单一路由模型名 → 映射至多个上游渠道</b>。调度策略可选「优先级容灾」（默认按次序执行主备容灾切换）或「轮询负载均衡」（多渠道均匀分担流量）；渠道内部多实例默认启用会话亲和锁定（保持上游 Prompt Cache 高命中率）。客户端仅需在请求体指定 <code>{"model":"路由模型名"}</code> 即可；对话模型定价用于调用成本审计，多模态模型支持按次计费。若未配置任何发布模型，网关默认直接透传所有内部模型。<br>支持<b>图片</b>与<b>视频</b>生成模型接入（如豆包 Seedream / Seedance 引擎）：图片标准端点 <code>POST /v1/images/generations</code>，视频异步生成支持火山方舟任务协议 <code>POST /api/v3/contents/generations/tasks</code>。</div>
+        <div class="hint" style="margin-bottom:16px;font-size:13.5px;line-height:2">网关端点仅对外暴露在此配置的模型定义：<b>单一路由模型名 → 映射至多个上游渠道</b>。调度策略可选「优先级容灾」（默认按次序执行主备容灾切换）或「轮询负载均衡」（多渠道均匀分担流量）；渠道内部多实例默认启用会话亲和锁定（保持上游 Prompt Cache 高命中率）。客户端仅需在请求体指定 <code>{"model":"路由模型名"}</code> 即可；对话模型定价用于调用成本审计，多模态模型支持按次计费。若未配置任何发布模型，网关默认直接透传所有内部模型。<br>支持<b>图片</b>与<b>视频</b>生成模型接入：图片标准端点 <code>POST /v1/images/generations</code>，视频异步生成支持火山方舟任务协议 <code>POST /api/v3/contents/generations/tasks</code>。</div>
         <div class="pub-grid" id="pubGrid"></div>
       </section>
     </div>
@@ -1351,14 +1330,11 @@ section h2{letter-spacing:0.04em !important}
       <div class="prov-card" onclick="startLogin('qwenwork')">
         <div class="t" style="color:var(--pink)">千问办公</div><div class="d">QwenWork 阿里<br>钉钉扫码授权登录</div>
       </div>
-      <div class="prov-card" onclick="startLogin('doubao')">
-        <div class="t" style="color:var(--accent2)">豆包 Doubao</div><div class="d">doubao.com<br>App 扫码自动纳管 · 文/图/视频</div>
-      </div>
     </div>
     <div id="loginFlow"></div>
     <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:16px">
       <div style="font-weight:600;margin-bottom:4px;font-size:13px">或直接导入服务商鉴权凭据</div>
-      <p class="hint" id="importHint">WorkBuddy：refreshToken / auth 文件 JSON（国际版选「WorkBuddy 国际」）；Qwen：<code>邮箱:密码</code> 自动凭据认证（推荐，免提取）或完整 Cookie 标头（高稳定性，包含 token=）；Trae：refreshToken（国际版加前缀 global:）；Qoder：控制台 PAT（国际版前缀 global:）；千问办公：ory_rt_ 开头的 refresh token；豆包：www.doubao.com 任一请求的完整 Cookie 标头（需含 s_v_web_id 与 sessionid）。</p>
+      <p class="hint" id="importHint">WorkBuddy：refreshToken / auth 文件 JSON（国际版选「WorkBuddy 国际」）；Qwen：<code>邮箱:密码</code> 自动凭据认证（推荐，免提取）或完整 Cookie 标头（高稳定性，包含 token=）；Trae：refreshToken（国际版加前缀 global:）；Qoder：控制台 PAT（国际版前缀 global:）；千问办公：ory_rt_ 开头的 refresh token。</p>
       <select id="importProv" style="margin-right:8px">
         <option value="workbuddy">WorkBuddy 国内</option>
         <option value="workbuddy-intl">WorkBuddy 国际</option>
@@ -1367,7 +1343,6 @@ section h2{letter-spacing:0.04em !important}
         <option value="qoder">Qoder 国内</option>
         <option value="qoder-intl">Qoder 国际</option>
         <option value="qwenwork">千问办公</option>
-        <option value="doubao">豆包 Doubao</option>
       </select>
       <textarea id="importCred" placeholder="粘贴凭证..."></textarea>
       <button class="btn primary" onclick="doImport()">导入并验证凭据</button>
@@ -2294,7 +2269,7 @@ function renderAcctCards(){
   wrap.style.display=hasAccts?'':'none';
   const emptyEl=$('#acctEmpty');
   if(emptyEl){
-    if(!hasAccts){emptyEl.style.display='block';emptyEl.innerHTML='当前账号池暂未接入任何服务商凭据，请点击右上角「添加账号」接入上游实例<br><span class="mini" style="color:var(--faint)">支持 WorkBuddy / Qwen / Trae / Qoder / 千问办公 / 豆包 等平台，接入后自动执行凭据托管与额度同步</span>'}
+    if(!hasAccts){emptyEl.style.display='block';emptyEl.innerHTML='当前账号池暂未接入任何服务商凭据，请点击右上角「添加账号」接入上游实例<br><span class="mini" style="color:var(--faint)">支持 WorkBuddy / Qwen / Trae / Qoder / 千问办公 等平台，接入后自动执行凭据托管与额度同步</span>'}
     else if(!list.length){emptyEl.style.display='block';emptyEl.innerHTML='没有匹配当前筛选条件的账号'}
     else emptyEl.style.display='none';
   }
