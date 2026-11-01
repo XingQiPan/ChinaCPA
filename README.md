@@ -56,17 +56,32 @@ Go 标准库的裸指纹与官方浏览器/IDE 客户端完全对不上。本项
 
 ## 🚀 快速开始
 
+### 方式一：下载预编译包（推荐）
+
+到 [Releases](https://github.com/XingQiPan/ChinaCPA/releases) 下载对应平台的压缩包，解压后直接运行：
+
+| 平台 | 包名 | 运行 |
+|---|---|---|
+| Windows x64 | `chinacpa-*-windows-amd64.zip` | 双击 `start.bat` 或运行 `chinacpa.exe` |
+| Windows ARM64 | `chinacpa-*-windows-arm64.zip` | 同上 |
+| Linux x64 | `chinacpa-*-linux-amd64.tar.gz` | `./start.sh` 或 `./chinacpa` |
+| Linux ARM64 | `chinacpa-*-linux-arm64.tar.gz` | 同上 |
+| macOS Intel | `chinacpa-*-macos-amd64.tar.gz` | 同上 |
+| macOS Apple Silicon | `chinacpa-*-macos-arm64.tar.gz` | 同上 |
+
+无需安装任何依赖（纯 Go 静态编译）。首次启动会自动生成 `config.json` 与 `data/` 目录。
+
+### 方式二：从源码构建
+
 ```bash
-# 1. 构建（或直接下载 release 的 chinacpa.exe）
-go build -o chinacpa.exe ./cmd/chinacpa
-
-# 2. 启动（首次自动生成 config.json）
-./chinacpa.exe -config config.json
-# Windows 双击 start.bat 也可以
-
-# 3. 打开面板
-# http://127.0.0.1:8313/   默认密码 123456
+go build -o chinacpa ./cmd/chinacpa
+./chinacpa -config config.json
+# Windows 用 go build -o chinacpa.exe ./cmd/chinacpa，然后双击 start.bat
 ```
+
+### 启动后
+
+打开面板 **http://127.0.0.1:8313/**（默认密码 `123456`，请尽快修改）。
 
 ### 面板操作
 

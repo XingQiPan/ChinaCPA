@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（手动触发时用于产物命名，如 v0.3.0）'
+        required: false
+        default: 'dev'
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.27'
+
+jobs:
+  # 先跑测试：不过就不发布，避免把坏包发出去
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go vet
+        run: go vet ./internal/...
+      - name: go test
+        run: go test ./internal/... -count=1
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            name: windows-amd64
+            ext: .exe
+          - goos: windows
+            goarch: arm64
+            name: windows-arm64
+            ext: .exe
+          - goos: linux
+            goarch: amd64
+            name: linux-amd64
+            ext: ''
+          - goos: linux
+            goarch: arm64
+            name: linux-arm64
+            ext: ''
+          - goos: darwin
+            goarch: amd64
+            name: macos-amd64
+            ext: ''
+          - goos: darwin
+            goarch: arm64
+            name: macos-arm64
+            ext: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.version }}"
+            [ -z "$V" ] && V="dev"
+          else
+            V="${GITHUB_REF_NAME}"
+          fi
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+          echo "version=$V"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          OUT="chinacpa-${{ steps.ver.outputs.value }}-${{ matrix.name }}"
+          mkdir -p "dist/${OUT}"
+          go build -trimpath -ldflags "-s -w" \
+            -o "dist/${OUT}/chinacpa${{ matrix.ext }}" ./cmd/chinacpa
+          ls -lh "dist/${OUT}/chinacpa${{ matrix.ext }}"
+
+      # 每个包都带说明与启动脚本，保证下载解压后直接可用
+      - name: Package
+        run: |
+          set -euo pipefail
+          OUT="chinacpa-${{ steps.ver.outputs.value }}-${{ matrix.name }}"
+          STAGE="dist/${OUT}"
+
+          cp .github/release-templates/README.txt "${STAGE}/README.txt"
+
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            cp .github/release-templates/start.bat "${STAGE}/start.bat"
+            sed -i 's/\r$//; s/$/\r/' "${STAGE}/start.bat"
+          else
+            cp .github/release-templates/start.sh "${STAGE}/start.sh"
+            chmod +x "${STAGE}/start.sh" "${STAGE}/chinacpa"
+          fi
+
+          cd dist
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -r -q "${OUT}.zip" "${OUT}"
+            rm -rf "${OUT}"
+            ls -lh "${OUT}.zip"
+          else
+            tar -czf "${OUT}.tar.gz" "${OUT}"
+            rm -rf "${OUT}"
+            ls -lh "${OUT}.tar.gz"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chinacpa-${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          retention-days: 30
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List packages
+        run: ls -lh artifacts/
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+      # 手动触发（无 tag）时只产出构建产物，供本次运行页面下载
+      - name: Upload all-platform bundle
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: chinacpa-all-platforms
+          path: artifacts/*
+          retention-days: 7

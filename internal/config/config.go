@@ -114,10 +114,14 @@ func Load(path string) (*Config, error) {
 	cfg := Default()
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("read config: %w", err)
 		}
-		return nil, fmt.Errorf("read config: %w", err)
+		// 首次运行（无配置文件）：Default() 未经 normalize，TLSFingerprint 等
+		// 指针字段为 nil，调用方解引用会崩溃。这里补齐默认值再返回。
+		cfg.normalize()
+		cfg.Path = path
+		return cfg, nil
 	}
 	if err := json.Unmarshal(raw, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
@@ -214,6 +218,9 @@ func (c *Config) PricingFileAbs() string {
 // SaveExample 向 path 写出带注释说明的示例配置（JSON 不支持注释，字段说明见 README）。
 func SaveExample(path string) error {
 	cfg := Default()
+	// 示例配置应写出完整可用的字段（含 tls_fingerprint 等 normalize 补的默认值），
+	// 否则用户拿到的是一个缺字段、语义不明确的模板。
+	cfg.normalize()
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
