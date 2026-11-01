@@ -7,6 +7,9 @@ models.json
 *.exe~
 *.zip
 
+# 构建产物（start.bat 自动生成；源码在 cmd/chinacpa）
+ccpa-server.exe
+
 # 本地归档：历史 exe、数据目录备份、调试截图、设计素材
 backup/
 
@@ -16,3 +19,4 @@ rail.json
 
 # rail-rs（Rust 浮动栏）构建产物
 rail-rs/target/
+.zcode/
