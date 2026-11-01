@@ -1,7 +1,15 @@
 # ChinaCPA 🇨🇳 国产大模型反代网关
 
+> ⚠️ **本项目仅供个人学习研究使用**，请勿用于任何商业用途或违反各平台服务条款的场景。
+>
+> 本仓库为 [XingQiPan/ChinaCPA](https://github.com/XingQiPan/ChinaCPA) 的**二创版本**（个人 fork 持续开发），详见文末「参考」。
+>
 > 一站式纳管多家国产 AI 平台账号，自动签到攒积分、自动刷新额度、自动统计计费，
 > 一个 OpenAI 兼容接口随便调 —— **无需下载任何官方客户端**。
+>
+> 「每日签到」分两类：**接口型**（有真实签到/领取端点：WorkBuddy、Trae、Qoder）和
+> **确认型**（上游无签到接口，发放由登录/服务端触发，本端查钱包/积分余额确认到账，
+> 未到账不算失败、当日自动复查：千问办公；Qwen、豆包无每日积分体系）。
 
 | 平台 | 登录方式 | 免费额度 | 每日签到 |
 |---|---|---|---|
@@ -9,7 +17,7 @@
 | **Qwen 通义千问**（chat.qwen.ai） | 粘贴网页 token（OAuth 免费层 2026-04 已下线） | 网页会话免费额度 | —（无签到体系，本地自动计数） |
 | **Trae**（字节 SOLO 免费通道，CN/国际） | PKCE 授权码回调 | ide_credits | ✅ 每日 +200 积分 |
 | **Qoder**（阿里，CN qoder.com.cn / 国际 qoder.sh） | 控制台 PAT 导入 | credits（套餐+加购+组织） | ✅ 每日积分活动自动领取 |
-| **千问办公**（阿里 QwenWork，gateway.qwenwork.cn） | 钉钉扫码授权（device-flow） | 积分制（个人/企业池） | ✅ 每日积分自动确认（登录触发发放，个人版 100~200/天当日有效） |
+| **千问办公**（阿里 QwenWork，gateway.qwenwork.cn） | 钉钉扫码授权（device-flow） | 积分制（个人/企业池） | ☑ 确认型：每日积分自动确认（登录触发发放，个人版 100~200/天当日有效） |
 | **豆包**（字节，www.doubao.com） | 豆包 App 扫码自动回调 / Cookie 兜底 | 网页通道（文 / 图 / 视频按豆包 App 权益） | —（无签到体系） |
 
 > Trae 2026-10 起切换到 PKCE 授权码登录（客户端 3.3.62），本项目已跟进新流程；旧版 refreshToken 凭证仍可粘贴导入。
@@ -22,7 +30,7 @@
 - **凭证即用**：面板 OAuth 授权 / 扫码 / PAT / refreshToken / Cookie 多种纳管方式，不需要安装官方 IDE/CLI
 - **六大平台**：WorkBuddy（CN/国际）、Qwen、Trae（CN/国际）、Qoder（CN/国际）、千问办公、豆包，模型前缀 `workbuddy:` `workbuddy-intl:` `qwen:` `trae:` `qoder:` `qwenwork:` `doubao:`
 - **豆包文 / 图 / 视频**：App 扫码自动回调纳管（字节 passport 协议）；`doubao-chat` 网页助手对话（OpenAI 兼容流式）、Seedream 图片生成（OpenAI Images 协议）、Seedance 视频生成（火山方舟 Ark 异步任务协议，自动解析无水印原片）
-- **自动签到积分**：每日 9 点、21 点自动签到（可配），失败记当日自动重试；WorkBuddy 任务中心自动接受任务+领取奖励
+- **自动签到积分**：每日 9 点、21 点自动签到（可配），失败记当日自动重试；WorkBuddy 任务中心自动接受任务+领取奖励。无签到接口的平台（千问办公确认型 / Qwen、豆包无体系）在面板以「说明」标签呈现，不计为失败
 - **额度自动获取**：每 10 分钟自动刷新各账号剩余额度（WorkBuddy 积分 / Trae ide_credits / Qwen 今日剩余次数）；豆包文/图/视频按账号本地日计数，重启不丢
 - **模型发布 · 渠道归组**：面板自定义对外模型 → 多个上游渠道（跨平台），渠道间失败转移 + 可配渠道策略（优先级 / 轮询均衡），渠道内多账号轮询 + 会话黏性；`/v1/models` 只暴露已发布模型（未配置时默认暴露全部内部模型），配置落盘 `data/models.json`
 - **OpenAI 兼容网关**：`/v1/models` + `/v1/chat/completions`（SSE 流式），多账号自动轮询 + 失败转移 + 限流冷却；上游凭证失效自动标记「需重新登录」并停止调度，重新导入即恢复
@@ -290,39 +298,55 @@ data/
 ## 🧩 架构
 
 ```
-cmd/chinacpa            入口
+cmd/chinacpa            网关入口；cmd/rail  Go 版浮动栏（旧）
+rail-rs/                Rust 版桌面浮动栏（现役，cargo build --release）
 internal/
 ├── model/              公共类型（账号/额度/模型/登录会话）
-├── config/             配置加载
+├── config/             配置加载与面板热保存
 ├── store/              凭证/状态/签到历史落盘（原子写）
-├── provider/           平台抽象 + 各实现
+├── provider/           平台抽象 + 各实现（错误分类 / 风控闸门识别）
 │   ├── workbuddy/      腾讯：OAuth、积分、签到、任务中心、模型、对话
-│   ├── qwen/           通义：网页会话通道、2000次/天计数、模型、对话
+│   ├── qwen/           通义：网页会话通道、日限计数、模型、对话
 │   ├── trae/           字节：授权回调、ExchangeToken、签到、额度、SOLO SSE→OpenAI
-│   └── doubao/         豆包网页协议：Cookie 导入、对话、Seedream 图片、Seedance 视频（提交+轮询+无水印选优）
-├── pool/               多账号池：轮询、冷却、模型路由（发布模型多渠道 / 前缀 / 裸名）
+│   ├── qoder/          阿里 Qoder：PAT 导入、额度、对话
+│   ├── qwenwork/       千问办公：钉钉扫码、积分池、对话
+│   └── doubao/         豆包网页协议：Cookie 导入、对话、Seedream 图片、Seedance 视频
+├── pool/               多账号池：轮询、冷却、模型路由、风控闸门退避重试
 ├── pubmodel/           发布模型配置（对外模型 → 多渠道 + 单价）
 ├── scheduler/          定时：签到、任务、额度刷新、保活
 ├── usage/              用量 JSONL + 聚合 + 计价估算（发布单价优先）
-├── gateway/            OpenAI 兼容网关（SSE 透传、流内 usage 提取）
-└── panel/              管理 API + 内嵌仪表板（embed 单文件 HTML）
+├── reqlog/             bbolt 请求审计日志（按范围聚合：模型×渠道×实例）
+├── gateway/            OpenAI / Responses / Claude 三协议网关（SSE 透传、usage 提取、密钥热更换）
+├── translator/         协议翻译层（Claude ↔ OpenAI、Responses ↔ OpenAI）
+├── thinking/           Claude 思考链配置处理（translator 配套）
+├── signature/          Claude thinking signature 校验（translator 配套）
+├── registry/           模型注册表垫片（thinking/signature 依赖的最小类型）
+├── client/             上游 HTTP 客户端封装
+├── panel/              管理 API + 内嵌仪表板（embed 单文件 HTML）
+└── util/               杂项工具
 ```
 
 ## ⚠️ 注意
 
-- 本项目仅供学习研究，请遵守各平台服务条款；上游风控收紧时对应通道可能失效
-- 各平台凭证即金钱：`data/` 目录请妥善保管，不要外传
+- **本项目仅限个人学习研究使用**：接口逆向、账号纳管、额度反代均为技术探索性质，请勿用于商业用途、转售分发或任何违反各平台服务条款的场景；使用者需自行承担全部风险与后果
+- 上游风控收紧时对应通道可能失效；各平台凭证即金钱：`data/` 目录请妥善保管，不要外传
 - WorkBuddy 刷新 token 有防重放（12153），本工具已做单账号串行刷新；多进程同时跑同一 data 目录有风险
 - Trae 登录回调要求面板与浏览器同机（127.0.0.1 回调）或局域网可达；服务器部署时可用「粘贴凭证」方式纳管
 
 ## 🙏 参考
 
-接口口径来自以下开源项目的实测成果（均已 fork 到 [XingQiPan](https://github.com/XingQiPan?tab=repositories)）：
+本仓库为 [XingQiPan/ChinaCPA](https://github.com/XingQiPan/ChinaCPA) 的**二创（衍生）版本**，在原项目基础上继续开发与改造（面板视觉升级、风控闸门退避重试、服务密钥热更换、用量范围查询、请求审计聚合等）。原仓库及全部上游出处致谢如下：
+
+接口口径来自以下开源项目的实测成果：
 
 - [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（WorkBuddy 全套）
 - [connectedGraph/trae2api-web](https://github.com/connectedGraph/trae2api-web)（Trae SOLO 通道）
 - [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（Qwen OAuth，v6.0.0 实现）
 - [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)（计价/用量思路）
+
+桌面浮动栏（`rail-rs/`）的悬浮交互与视觉设计参考自：
+
+- [qunqin24/Pulse](https://github.com/qunqin24/Pulse)（macOS 屏幕边缘 AI 用量监视器，Apache-2.0；本项目以 Rust + Direct2D 为其 Windows 复刻实现）
 
 ## License
 

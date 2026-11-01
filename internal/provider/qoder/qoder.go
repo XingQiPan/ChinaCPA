@@ -632,6 +632,7 @@ func (p *Provider) Quota(ctx context.Context, a *model.Account) (*model.QuotaInf
 			detail["quota_exceeded"] = usage.IsQuotaExceeded
 			if usage.ExpiresAtMs > 0 {
 				detail["resets_at"] = time.UnixMilli(usage.ExpiresAtMs).Format("01-02 15:04")
+				detail["resets_at_unix"] = usage.ExpiresAtMs / 1000
 			}
 		} else if err != nil {
 			detail["quota_error"] = err.Error()
@@ -724,12 +725,13 @@ func (p *Provider) Checkin(ctx context.Context, a *model.Account) (*model.Checki
 		if claimed > 0 {
 			return &model.CheckinResult{OK: true, Already: true, Message: "今日已签到"}, nil
 		}
+		// 平台当天没挂可领的积分活动：状态说明而非签到失败（Info=true，调度层照常重试）
 		if len(items) > 0 {
 			// 上游有活动但均为浏览类（VIEW_DETAILS，如社区集结/订阅优惠），非一键领取
-			return &model.CheckinResult{OK: false,
+			return &model.CheckinResult{OK: false, Info: true,
 				Message: fmt.Sprintf("暂无可领取的签到活动（上游 %d 个活动均非领取类）", len(items))}, nil
 		}
-		return &model.CheckinResult{OK: false, Message: "上游当前没有进行中的签到活动"}, nil
+		return &model.CheckinResult{OK: false, Info: true, Message: "上游当前没有进行中的签到活动"}, nil
 	}
 	okCount := 0
 	var claimErr string

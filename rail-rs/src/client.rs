@@ -3,6 +3,7 @@ use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::Sender;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -12,6 +13,10 @@ pub struct Client {
     base_url: String,
     password: String,
     agent: ureq::Agent,
+    /// 会话 cookie 缓存：login() 后存这里，所有请求统一携带。
+    /// 之前 fetch() 的 401 重试不带 cookie，导致永远拿不到真实数据、
+    /// 静默回退 demo —— 这是"rail 显示假数据"的根因。
+    cookie: OnceLock<Mutex<String>>,
 }
 
 impl Client {
@@ -27,19 +32,38 @@ impl Client {
             base_url: base_url.trim_end_matches('/').to_string(),
             password,
             agent,
+            cookie: OnceLock::new(),
+        }
+    }
+
+    fn cookie(&self) -> String {
+        self.cookie
+            .get_or_init(|| Mutex::new(String::new()))
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_cookie(&self, c: String) {
+        if let Ok(mut m) = self.cookie.get_or_init(|| Mutex::new(String::new())).lock() {
+            *m = c;
         }
     }
 
     pub fn fetch(&self) -> Result<Vec<Metric>, String> {
         let url = format!("{}/api/overview", self.base_url);
-        let resp = match self.agent.get(&url).call() {
+        let do_get = |cookie: &str| {
+            let mut req = self.agent.get(&url);
+            if !cookie.is_empty() {
+                req = req.set("Cookie", cookie);
+            }
+            req.call()
+        };
+        let resp = match do_get(&self.cookie()) {
             Ok(r) => r,
             Err(ureq::Error::Status(401, _)) => {
-                self.login()?;
-                self.agent
-                    .get(&url)
-                    .call()
-                    .map_err(|e| format!("重登后请求失败: {e}"))?
+                let c = self.login()?;
+                do_get(&c).map_err(|e| format!("重登后请求失败: {e}"))?
             }
             Err(e) => return Err(format!("请求失败: {e}")),
         };
@@ -61,6 +85,7 @@ impl Client {
 
         if resp.status() == 200 {
             let cookie = resp.header("set-cookie").unwrap_or("").to_string();
+            self.set_cookie(cookie.clone());
             Ok(cookie)
         } else {
             Err(format!("登录返回状态码: {}", resp.status()))
@@ -97,6 +122,22 @@ impl Client {
             }
         }
     }
+}
+
+/// 点环刷新：POST /api/accounts/action {provider, uid, action:"quota"}。
+/// 后端刷新完成后经 SSE 推回，rail 自动收到新数据。
+/// 独立线程 fire-and-forget 调用，失败静默（轮询/SSE 会兜底）。
+pub fn spawn_refresh(base_url: String, password: String, provider: String, uid: String) {
+    thread::spawn(move || {
+        let client = Client::new(base_url, password);
+        let cookie = match client.login() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let url = format!("{}/api/accounts/action", client.base_url);
+        let body = serde_json::json!({ "provider": provider, "uid": uid, "action": "quota" });
+        let _ = client.agent.post(&url).set("Cookie", &cookie).send_json(body);
+    });
 }
 
 pub fn spawn_network_worker(

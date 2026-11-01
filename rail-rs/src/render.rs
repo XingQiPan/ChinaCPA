@@ -3,16 +3,32 @@ use windows::{
     Win32::Graphics::Direct2D::*,
     Win32::Graphics::Direct2D::Common::*,
     Win32::Graphics::DirectWrite::*,
-    Win32::Graphics::Dxgi::DXGI_PRESENT,
+    Win32::Foundation::HWND,
 };
+
+use windows::Foundation::Numerics::Matrix3x2;
+
+/// draw_detail_card 每帧写入的卡片物理矩形（含尾巴膨胀），供 NCHITTEST 命中。
+thread_local! {
+    pub static CARD_RECT: std::cell::Cell<(f32, f32, f32, f32)> =
+        const { std::cell::Cell::new((0.0, 0.0, 0.0, 0.0)) };
+}
+
+const IDENTITY: Matrix3x2 = Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0 };
 
 use crate::graphics::D2DEngine;
 use crate::metrics::Metric;
+use crate::placement::{canon_matrix, canon_to_window, Dock, Edge};
 use crate::spring::{FadeValue, SpringValue};
 
+#[derive(Clone)]
 pub struct RingAnimState {
     pub arc: SpringValue,
     pub halo: FadeValue,
+    /// 刷新扫光进度：0=无，>0 时沿环走一圈（16% 弧，0.85s）。点环刷新后触发。
+    pub sweep: f32,
+    /// 窗口时钟弧平滑值（reset 跳回时 easeOut 过渡）
+    pub clock: SpringValue,
 }
 
 impl RingAnimState {
@@ -20,6 +36,8 @@ impl RingAnimState {
         Self {
             arc: SpringValue::new(val),
             halo: FadeValue::new(0.0, 5.0),
+            sweep: 0.0,
+            clock: SpringValue::new(0.0),
         }
     }
 }
@@ -40,6 +58,17 @@ pub struct LayoutMetrics {
     pub card_radius: f32,
     pub pointer_w: f32,
     pub pointer_h: f32,
+    /// 百分比文字的行高预算（竖栏与横栏共用）。
+    pub percent_h: f32,
+    /// 百分比文字的宽度预算。横栏的一个项目按「环」与「文字」的较宽者算，
+    /// 100% 比 36pt 的环更宽，这就是 Pulse `percentTextWidth` = 38。
+    pub percent_w: f32,
+    /// 横栏（顶/底停靠）两端留白；竖栏不用它，竖栏沿长度轴用 `end_pad`。
+    pub cross_pad: f32,
+    /// 竖栏沿长度轴、环之前与之后的留白（Pulse verticalPadding = 46）。
+    pub end_pad: f32,
+    /// 环心到文字的间隙（Pulse ringToTextSpacing = 6）。
+    pub ring_to_text: f32,
 }
 
 impl LayoutMetrics {
@@ -60,6 +89,121 @@ impl LayoutMetrics {
             card_radius: 20.0 * scale,
             pointer_w: 20.0 * scale,
             pointer_h: 40.0 * scale,
+            percent_h: 16.0 * scale,
+            percent_w: 38.0 * scale,
+            cross_pad: 10.0 * scale,
+            end_pad: 46.0 * scale,
+            ring_to_text: 6.0 * scale,
+        }
+    }
+
+    /// 一个环连同它文字的厚度（跨栏方向）：环 + 间隙 + 文字。
+    /// Pulse `itemHeight`，横栏的胶囊厚度由它加两侧 `cross_pad` 得出。
+    pub fn item_thickness(&self) -> f32 {
+        self.ring_d + self.ring_to_text + self.percent_h
+    }
+
+    /// 横栏的胶囊厚度（Pulse `DockLayout.thickness(on: .horizontal)`）：
+    /// 36 + 6 + 16 的竖向堆叠，上下各 10 → 78。竖栏仍是 64。
+    /// 顶栏把字放在环下，正是这多出来的 14pt 让文字不被切掉。
+    pub fn cross_thickness(&self, dock: Dock) -> f32 {
+        if dock.lies_across() {
+            self.item_thickness() + self.cross_pad * 2.0
+        } else {
+            self.pill_w
+        }
+    }
+
+    /// 沿栏方向一个项目占的长度（含间隙）。
+    /// 竖栏：环 + 间隙 + 文字 + 环间距（88）。
+    /// 横栏：环与文字并排上下叠，项目沿栏长度取两者较宽者（38）+ 间隙（30）。
+    pub fn slot_step(&self, dock: Dock) -> f32 {
+        if dock.lies_across() {
+            self.ring_d.max(self.percent_w) + self.item_spacing
+        } else {
+            self.ring_d + self.ring_to_text + self.percent_h + self.item_spacing
+        }
+    }
+
+    /// 沿栏方向的内容总长度（不含两端留白）。
+    pub fn content_length(&self, dock: Dock, n: usize) -> f32 {
+        let n = n.max(1) as f32;
+        let step = self.slot_step(dock);
+        n * step - self.item_spacing
+    }
+
+    /// 沿栏方向两端留白。
+    ///
+    /// 两种轴向都是 Pulse 的 `endPadding` = 46：停靠时端头的凹弧要吃掉
+    /// `flare_height`，46 才留得下第一个环和帽端的圆角。横栏曾误用
+    /// `cross_pad`（10，那是跨栏方向的内边距），第一个环直接压进圆角里
+    /// 被切掉一半 —— 两个方向的数字不能互换。
+    pub fn along_pad(&self, _dock: Dock) -> f32 {
+        self.end_pad
+    }
+
+    /// 展开后胶囊沿栏方向的总长度。
+    pub fn expanded_length(&self, dock: Dock, n: usize) -> f32 {
+        self.content_length(dock, n) + self.along_pad(dock) * 2.0
+    }
+
+    /// 第 i 个环心在规范空间里沿栏方向的坐标。
+    /// 沿栏轴起点 = 胶囊在该轴的起点 + 两端留白 + 项目中心。
+    pub fn ring_along(&self, dock: Dock, start: f32, i: usize) -> f32 {
+        let into = if dock.lies_across() {
+            // 横栏：项目沿栏宽取环与文字的较宽者，环心居中其中。
+            self.ring_d.max(self.percent_w) / 2.0
+        } else {
+            // 竖栏：环心离项目起点半个环。
+            self.ring_d / 2.0
+        };
+        start + self.along_pad(dock) + into + (i as f32) * self.slot_step(dock)
+    }
+
+    /// 环心到胶囊"卡片侧"边缘的距离。
+    ///
+    /// 不是环心到屏幕边那个数：横栏里环心离屏幕边只有 28（`cross_pad + 半环`），
+    /// 而胶囊厚 78，所以到内侧边缘还有 50。用 28 会让卡片压进胶囊 14pt，
+    /// 正好盖住那行百分比。竖栏环心居中，两个方向都是 32。
+    pub fn ring_to_far_edge(&self, dock: Dock) -> f32 {
+        self.cross_thickness(dock) - self.ring_cross_from_edge(dock)
+    }
+
+    /// 环心到屏幕边的距离（规范空间里从 `bu` 向内量）。
+    pub fn ring_cross_from_edge(&self, dock: Dock) -> f32 {
+        if dock.lies_across() {
+            self.cross_pad + self.ring_d / 2.0
+        } else {
+            self.pill_w / 2.0
+        }
+    }
+
+    /// 环心在厚度轴的坐标：规范空间里 `bu` 恒为屏幕边，所以从边向内量。
+    ///
+    /// 横栏：环贴屏幕边，离边 `cross_pad + ring_d/2` = 10 + 18 = 28，文字在
+    /// 环的内侧。把它当厚度中心（39）是先前文字被切、卡片压在胶囊上的
+    /// 直接原因。竖栏：环居中于 64pt 胶囊，离边 32。
+    pub fn ring_cross(&self, dock: Dock, bu: f32) -> f32 {
+        bu - self.ring_cross_from_edge(dock)
+    }
+
+    /// 文字块中心在厚度轴的坐标（与 `ring_cross` 同一参照）。
+    /// 横栏：环之后隔 `ring_to_text`；竖栏：文字与环同一条中线。
+    pub fn text_cross(&self, dock: Dock, bu: f32) -> f32 {
+        if dock.lies_across() {
+            bu - (self.cross_pad + self.ring_d + self.ring_to_text + self.percent_h / 2.0)
+        } else {
+            bu - self.pill_w / 2.0
+        }
+    }
+
+    /// 文字沿栏方向的宽度预算。横栏里它与环上下叠，宽度取项目宽；
+    /// 竖栏里它与环同一中线，预算为胶囊宽减两侧余量。
+    pub fn text_length(&self, dock: Dock) -> f32 {
+        if dock.lies_across() {
+            self.ring_d.max(self.percent_w)
+        } else {
+            self.pill_w - 6.0 * self.scale
         }
     }
 }
@@ -76,6 +220,11 @@ pub fn render_frame(
     w: f32,
     h: f32,
     scale: f32,
+    segmented: bool,
+    dock: Dock,
+    pulled: f32,
+    thinning: f32,
+    hwnd: HWND,
 ) -> Result<()> {
     unsafe {
         let rt = &eng.rt;
@@ -84,27 +233,76 @@ pub fn render_frame(
 
         let lm = LayoutMetrics::new(scale);
         let n = metrics.len().min(8);
+        // 规范空间恒为"右边缘竖栏"；四边靠仿射变换映射到物理窗口。
+        // 形状在变换下绘制，文字单独用恒等变换保持正立（见各 draw_* 内 SetTransform）。
+        // 横置的栏（顶/底/自由横条）规范空间的厚度轴是窗口的高。
+        // 必须走 canonical_size，手工列边会漏掉 Floating(false)，
+        // 于是自由横条按横栏画、却按竖栏读尺寸，内容跑到窗口外。
+        let (bu, bv) = crate::placement::canonical_size(dock, w as i32, h as i32);
+        let m3x2 = canon_matrix(dock, bu, bv);
+        // 形状在规范→物理变换下绘制；文字/图标切回恒等变换保持正立。
+        rt.SetTransform(&m3x2);
         if n == 0 {
             rt.EndDraw(None, None)?;
-            eng.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
+            eng.present(hwnd)?;
             return Ok(());
         }
 
         // 1. 动态形态插值（完全匹配 Pulse 的 DockBerthShape）
-        let slot_h = lm.ring_d + 6.0 * scale + 16.0 * scale + lm.item_spacing;
-        let total_content_h = (n as f32) * slot_h - lm.item_spacing;
-        let expanded_h = total_content_h + 46.0 * scale * 2.0; // Pulse: verticalPadding = 46
+        //    厚度轴：竖栏 64，横栏 78（环 36 + 间隙 6 + 文字 16 + 上下各 10）。
+        //    长度轴：竖栏 46 两端留白，横栏 10 两端留白（Pulse endPadding）。
+        let expanded_h = lm.expanded_length(dock, n);
         let collapsed_h = lm.sliver_h;
 
-        let cur_w = lm.sliver_w + (lm.pill_w - lm.sliver_w) * openness;
-        let cur_h = collapsed_h + (expanded_h - collapsed_h) * openness;
+        let thickness = lm.cross_thickness(dock);
+        // 自由态不自动收起（用户把它摆在桌面上就是要一直看得见），
+        // 所以它的厚度/长度始终是完整胶囊，不随 openness 插值。
+        // 必须与 main.rs 的 sync_window_size / capsule_band 一致。
+        let (cur_w, cur_h) = if dock.is_docked() {
+            (
+                lm.sliver_w + (thickness - lm.sliver_w) * openness,
+                collapsed_h + (expanded_h - collapsed_h) * openness,
+            )
+        } else {
+            (thickness, expanded_h)
+        };
 
-        let dock_top = (h - cur_h) / 2.0;
+        // 规范空间几何（bu=沿厚度轴宽, bv=沿长度轴高）
+        // 液颈拉伸：pulled>0 时 rail 整体从贴边侧内移 drawn 距离，
+        // 并在贴边侧画一条收窄的液颈连回边缘（Pulse DropletTether）。
+        let rest = 1.0 - (pulled / 80.0).clamp(0.0, 1.0);
+        let drawn = pulled * (1.0 - (1.0 - 0.15) * rest * rest);
+        let necking = thinning.clamp(0.0, 1.0);
+        let dock_top = (bv - cur_h) / 2.0;
         let dock_bottom = dock_top + cur_h;
-        let dock_left = w - cur_w;
-        let dock_right = w;
+        let dock_left = bu - cur_w - drawn;
+        let dock_right = bu - drawn;
 
         // 2. 绘制 Pulse S 型贴边凹弧胶囊
+        //    收起态告警染色（Pulse alertTint）：sliver 在最高额度 ≥ 阈值或耗尽
+        //    时整条染告警色；展开即回黑（环本身携带状态）。
+        //    balance（积分余额型）不参与告警折叠：其 used_frac 恒为 1.0 是
+        //    "有余额"而非"快用完"，染色会误报（Pulse 用 isExhausted 表耗尽）。
+        let alert = if openness < 0.3 {
+            let worst = metrics.iter().fold(None::<&Metric>, |acc, m| {
+                if m.balance {
+                    return acc;
+                }
+                match acc {
+                    None => Some(m),
+                    Some(a) if m.used > a.used => Some(m),
+                    Some(a) => Some(a),
+                }
+            });
+            match worst {
+                Some(m) if m.spent || m.used >= 0.75 => {
+                    Some(eng.color_for_fraction(m.used as f32, false, m.spent))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         draw_pulse_berth_shape(
             eng,
             dock_left,
@@ -112,8 +310,27 @@ pub fn render_frame(
             dock_right,
             dock_bottom,
             openness,
+            alert,
             &lm,
+            dock.is_docked(),
         )?;
+
+        // 液颈：把 rail 贴边侧拉一条收窄的桥接到屏幕边缘（Pulse fluidTurn 近似）。
+        // waistHalf 随张力收细（1-u^2.2 的精简版：necking 越小越细）。
+        if drawn > 0.5 {
+            let half_h = cur_h * 0.5;
+            let waist = half_h * (0.45 * necking).clamp(0.02, 0.45);
+            let neck = eng.d2d_factory.CreatePathGeometry()?;
+            let s = neck.Open()?;
+            let (cy, bx) = ((dock_top + dock_bottom) / 2.0, dock_right);
+            s.BeginFigure(D2D_POINT_2F { x: bx, y: cy - waist }, D2D1_FIGURE_BEGIN_FILLED);
+            s.AddLine(D2D_POINT_2F { x: bu, y: cy - waist * 0.7 });
+            s.AddLine(D2D_POINT_2F { x: bu, y: cy + waist * 0.7 });
+            s.AddLine(D2D_POINT_2F { x: bx, y: cy + waist });
+            s.EndFigure(D2D1_FIGURE_END_CLOSED);
+            s.Close()?;
+            rt.FillGeometry(&neck, alert.unwrap_or(&eng.brush_rail), None);
+        }
 
         // 3. 闲置状态居中彩色呼吸指示条（openness < 0.6 时平滑呈现）
         if openness < 0.6 {
@@ -135,17 +352,18 @@ pub fn render_frame(
         // 4. 绘制各模型槽位（openness > 0.35 时随胶囊展开渐现）
         let ring_alpha = ((openness - 0.35) / 0.65).clamp(0.0, 1.0);
         let mut slot_centers = Vec::with_capacity(n);
-        let start_y = dock_top + 46.0 * scale + lm.ring_d / 2.0;
         for i in 0..n {
-            slot_centers.push(start_y + (i as f32) * slot_h);
+            slot_centers.push(lm.ring_along(dock, dock_top, i));
         }
 
         if ring_alpha > 0.01 {
             for (i, m) in metrics.iter().take(n).enumerate() {
                 let cy = slot_centers[i];
-                let cx = dock_left + cur_w / 2.0;
+                let cx = lm.ring_cross(dock, bu);
                 let cur_val = anims.get(i).map(|a| a.arc.cur).unwrap_or(m.used as f32);
                 let halo_val = anims.get(i).map(|a| a.halo.cur).unwrap_or(0.0);
+                let sweep_val = anims.get(i).map(|a| a.sweep).unwrap_or(0.0);
+                let clock_val = anims.get(i).map(|a| a.clock.cur).unwrap_or(-1.0);
 
                 draw_usage_ring(
                     eng,
@@ -157,31 +375,40 @@ pub fn render_frame(
                     hover_index == Some(i),
                     ring_alpha,
                     busy_spin,
+                    sweep_val,
+                    clock_val,
+                    dock,
+                    bu,
+                    bv,
+                    &m3x2,
                     &lm,
                 )?;
             }
         }
 
-        // 5. 展开 Pulse 经典水滴气泡详情卡片 (UsageBubbleShape)
+        // 5. 详情卡片：物理空间正立布局（文字恒水平，四边通用），
+        //    水滴尾巴指向悬停环（先映射环心到物理坐标）。
         if card_openness > 0.01 && hover_index.is_some() {
             let idx = hover_index.unwrap().min(n - 1);
             let m = &metrics[idx];
-            let target_anchor_y = slot_centers[idx];
-            let active_pointer_y = if pointer_y > 0.0 { pointer_y } else { target_anchor_y };
-
-            draw_detail_card(
-                eng,
-                m,
-                dock_left,
-                active_pointer_y,
-                card_openness,
-                h,
-                &lm,
-            )?;
+            let target_anchor = slot_centers[idx];
+            let active_pointer = if pointer_y > 0.0 { pointer_y } else { target_anchor };
+            // 尾巴要指向环心本身（横栏里环心不在厚度中心，用厚度中线会偏 11pt）。
+            let (mut pcx, pcy) =
+                canon_to_window(dock, lm.ring_cross(dock, bu), active_pointer, bu, bv);
+            let _ = &mut pcx;
+            let side: u8 = match dock {
+                Dock::Edge(Edge::Right) | Dock::Floating(true) => 0,
+                Dock::Edge(Edge::Left) => 1,
+                Dock::Edge(Edge::Top) | Dock::Floating(false) => 2,
+                Dock::Edge(Edge::Bottom) => 3,
+            };
+            draw_detail_card(eng, m, pcx, pcy, w, h, side, card_openness, segmented, &m3x2, &lm)?;
         }
 
+        rt.SetTransform(&IDENTITY);
         rt.EndDraw(None, None)?;
-        eng.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
+        eng.present(hwnd)?;
     }
     Ok(())
 }
@@ -193,7 +420,9 @@ unsafe fn draw_pulse_berth_shape(
     right: f32,
     bottom: f32,
     openness: f32,
+    alert: Option<&ID2D1SolidColorBrush>,
     lm: &LayoutMetrics,
+    docked: bool,
 ) -> Result<()> {
     let rt = &eng.rt;
     let path = eng.d2d_factory.CreatePathGeometry()?;
@@ -201,6 +430,80 @@ unsafe fn draw_pulse_berth_shape(
 
     let w = right - left;
     let h = bottom - top;
+
+    // 自由态：两端是圆头，不是停靠态那种贴边的凹弧。
+    // 凹弧的意义是「这根栏从屏幕边长出来」，离开屏幕边之后它就只是
+    // 一个被切平的端头，紧挨着屏幕边时看着像被削掉了一块。
+    if !docked {
+        let r = ((lm.corner_r * openness + (lm.sliver_w / 2.0) * (1.0 - openness))
+            .min(w / 2.0)
+            .min(h / 2.0))
+        .max(0.0);
+        if r * 2.0 >= h.min(w) {
+            // 细条/圆头：整条就是一个圆角矩形
+            rt.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F { left, top, right, bottom },
+                    radiusX: r,
+                    radiusY: r,
+                },
+                alert.unwrap_or(&eng.brush_rail),
+            );
+            rt.DrawRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F { left, top, right, bottom },
+                    radiusX: r,
+                    radiusY: r,
+                },
+                &eng.brush_hairline,
+                0.75,
+                None,
+            );
+            return Ok(());
+        }
+        // 圆角矩形按四个角画：每条弧只跨一个半径，端点相差一个半径。
+        // 一次 arc 从 (right-r, top) 直接跨到 (right-r, bottom) 是错的 ——
+        // 两端相距 502pt 而半径只有 26pt，Direct2D 把它退化成一条巨大的
+        // 凸弧，整块盖在屏幕上（自由竖栏实测就是这样）。
+        sink.BeginFigure(D2D_POINT_2F { x: left + r, y: top }, D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddLine(D2D_POINT_2F { x: right - r, y: top });
+        sink.AddArc(&D2D1_ARC_SEGMENT {
+            point: D2D_POINT_2F { x: right, y: top + r },
+            size: D2D_SIZE_F { width: r, height: r },
+            rotationAngle: 0.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+            arcSize: D2D1_ARC_SIZE_SMALL,
+        });
+        sink.AddLine(D2D_POINT_2F { x: right, y: bottom - r });
+        sink.AddArc(&D2D1_ARC_SEGMENT {
+            point: D2D_POINT_2F { x: right - r, y: bottom },
+            size: D2D_SIZE_F { width: r, height: r },
+            rotationAngle: 0.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+            arcSize: D2D1_ARC_SIZE_SMALL,
+        });
+        sink.AddLine(D2D_POINT_2F { x: left + r, y: bottom });
+        sink.AddArc(&D2D1_ARC_SEGMENT {
+            point: D2D_POINT_2F { x: left, y: bottom - r },
+            size: D2D_SIZE_F { width: r, height: r },
+            rotationAngle: 0.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+            arcSize: D2D1_ARC_SIZE_SMALL,
+        });
+        sink.AddLine(D2D_POINT_2F { x: left, y: top + r });
+        sink.AddArc(&D2D1_ARC_SEGMENT {
+            point: D2D_POINT_2F { x: left + r, y: top },
+            size: D2D_SIZE_F { width: r, height: r },
+            rotationAngle: 0.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+            arcSize: D2D1_ARC_SIZE_SMALL,
+        });
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink.Close()?;
+        rt.FillGeometry(&path, alert.unwrap_or(&eng.brush_rail), None);
+        rt.DrawGeometry(&path, &eng.brush_hairline, 0.75, None);
+        return Ok(());
+    }
 
     let f = (lm.flare_h * openness).min(h / 2.0);
     let fw = (lm.flare_w * openness).min(w * 0.7).max(0.0);
@@ -261,7 +564,7 @@ unsafe fn draw_pulse_berth_shape(
     sink.EndFigure(D2D1_FIGURE_END_CLOSED);
     sink.Close()?;
 
-    rt.FillGeometry(&path, &eng.brush_rail, None);
+    rt.FillGeometry(&path, alert.unwrap_or(&eng.brush_rail), None);
     rt.DrawGeometry(&path, &eng.brush_hairline, 0.75, None);
 
     Ok(())
@@ -277,10 +580,23 @@ unsafe fn draw_usage_ring(
     is_hovered: bool,
     ring_alpha: f32,
     busy_spin: f32,
+    sweep: f32,
+    clock: f32,
+    dock: Dock,
+    bu: f32,
+    bv: f32,
+    m3x2: &Matrix3x2,
     lm: &LayoutMetrics,
 ) -> Result<()> {
     let rt = &eng.rt;
     let r = lm.ring_d / 2.0;
+    // 环内容恒正立：映射环心到物理坐标后切恒等变换绘制
+    // （圆环旋转不变，但进度弧 12 点起点与文字不能随边镜像/旋转）。
+    // 环心在厚度轴的坐标已由 ring_cross 按边算好（横栏贴屏幕边，竖栏居中），
+    // 这里只做规范→物理映射，不再额外平移。
+    let canon_along = cy; // 沿栏规范坐标，文本定位仍要用它
+    let (cx, cy) = canon_to_window(dock, cx, cy, bu, bv);
+    rt.SetTransform(&IDENTITY);
 
     // 1. 悬停微发光晕 (Halo)
     if is_hovered || halo_val > 0.01 {
@@ -308,10 +624,30 @@ unsafe fn draw_usage_ring(
     );
 
     // 3. 动态进度弧 (使用 Direct2D PathGeometry 顺时针圆头绘制)
+    //    刷新扫光进行中时，原弧 dim 到 0.3（Pulse refreshMark 行为）
     let sweep_deg = (val * 360.0).clamp(0.0, 359.9);
     if sweep_deg > 0.5 {
         let arc_brush = eng.color_for_fraction(val, m.balance, m.spent);
-        draw_arc(eng, cx, cy, r, -90.0, sweep_deg, lm.ring_line, arc_brush)?;
+        if sweep > 0.0 {
+            let dim = D2D1_COLOR_F {
+                r: arc_brush.GetColor().r,
+                g: arc_brush.GetColor().g,
+                b: arc_brush.GetColor().b,
+                a: 0.3 * ring_alpha,
+            };
+            if let Ok(b) = rt.CreateSolidColorBrush(&dim, None) {
+                draw_arc(eng, cx, cy, r, -90.0, sweep_deg, lm.ring_line, &b)?;
+            }
+        } else {
+            draw_arc(eng, cx, cy, r, -90.0, sweep_deg, lm.ring_line, arc_brush)?;
+        }
+    }
+
+    // 3b. 刷新扫光：16% 弧沿整圈匀速走（0.85s 走完 sweep 0→1），同环色
+    if sweep > 0.0 && sweep < 1.0 {
+        let arc_brush = eng.color_for_fraction(val, m.balance, m.spent);
+        let mark_start = -90.0 + sweep * 360.0;
+        draw_arc(eng, cx, cy, r, mark_start, 57.6, lm.ring_line, arc_brush)?;
     }
 
     // 4. 中心深色圆盘 (Pulse: centreDiameter = 20pt)
@@ -328,7 +664,30 @@ unsafe fn draw_usage_ring(
         draw_arc(eng, cx, cy, busy_r, busy_deg, 60.0, 1.8 * lm.scale, &eng.brush_text_primary)?;
     }
 
-    // 6. 平台图标贴图
+    // 5b. 窗口时钟弧（Pulse windowClock）：外圈 hairline，半径 = 环外缘 + 4pt·scale。
+    //     轨道 0.16 / 弧 0.7 中性灰白、2pt 圆头、12 点起顺时针；数据不全不画。
+    if clock > -0.5 {
+        let clw = 2.0 * lm.scale;
+        let cr = r + lm.ring_line / 2.0 + 4.0 * lm.scale;
+        let track_col = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 * ring_alpha };
+        if let Ok(tb) = rt.CreateSolidColorBrush(&track_col, None) {
+            rt.DrawEllipse(
+                &D2D1_ELLIPSE { point: D2D_POINT_2F { x: cx, y: cy }, radiusX: cr, radiusY: cr },
+                &tb,
+                clw,
+                None,
+            );
+        }
+        if clock > 0.005 {
+            let arc_col = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.7 * ring_alpha };
+            if let Ok(ab) = rt.CreateSolidColorBrush(&arc_col, None) {
+                let deg = (clock * 360.0).clamp(0.0, 359.9);
+                draw_arc(eng, cx, cy, cr, -90.0, deg, clw, &ab)?;
+            }
+        }
+    }
+
+    // 6. 平台图标贴图（随栏整体旋转，与 Pulse 单一变换一致）
     if let Some(bmp) = eng.logo_bitmaps.get(&m.provider) {
         let icon_sz = disc_r * 1.6;
         let dest_rect = D2D_RECT_F {
@@ -372,13 +731,22 @@ unsafe fn draw_usage_ring(
         format!("{:.0}%", val * 100.0)
     };
     let u16_label: Vec<u16> = label_text.encode_utf16().collect();
-    let text_w = lm.pill_w - 6.0 * lm.scale;
-    let text_top = cy + r + 6.0 * lm.scale;
+    let text_w = lm.text_length(dock);
+    let text_h = lm.percent_h;
+    // 文字位置：横栏由 text_cross 给出（环内侧、胶囊内），竖栏在环的正下方
+    // （底停靠则在上方）。两者都在物理空间里画（文字恒正立）。
+    let (tcx, tcy) = if dock.lies_across() {
+        canon_to_window(dock, lm.text_cross(dock, bu), canon_along, bu, bv)
+    } else {
+        let below = !matches!(dock, Dock::Edge(Edge::Bottom));
+        let dy = r + lm.ring_to_text + text_h / 2.0;
+        (cx, if below { cy + dy } else { cy - dy })
+    };
     let text_rect = D2D_RECT_F {
-        left: cx - text_w / 2.0,
-        top: text_top,
-        right: cx + text_w / 2.0,
-        bottom: text_top + 16.0 * lm.scale,
+        left: tcx - text_w / 2.0,
+        top: tcy - text_h / 2.0,
+        right: tcx + text_w / 2.0,
+        bottom: tcy + text_h / 2.0,
     };
     let text_brush = if m.spent || (m.used >= 0.75 && !m.balance && !m.empty) {
         if m.spent { &eng.brush_exhausted } else { &eng.brush_warning }
@@ -396,6 +764,7 @@ unsafe fn draw_usage_ring(
         D2D1_DRAW_TEXT_OPTIONS_NONE,
         DWRITE_MEASURING_MODE_NATURAL,
     );
+    rt.SetTransform(m3x2);
 
     Ok(())
 }
@@ -444,199 +813,352 @@ unsafe fn draw_arc(
 unsafe fn draw_detail_card(
     eng: &D2DEngine,
     m: &Metric,
-    dock_left: f32,
-    pointer_y: f32,
+    ring_cx: f32,
+    ring_cy: f32,
+    win_w: f32,
+    win_h: f32,
+    side: u8, // 0=Right 1=Left 2=Top 3=Bottom
     card_openness: f32,
-    screen_h: f32,
+    segmented: bool,
+    m3x2: &Matrix3x2,
     lm: &LayoutMetrics,
 ) -> Result<()> {
     let rt = &eng.rt;
     let scale = lm.scale;
+    // 卡片内容（文字/进度条）恒正立：切恒等变换；结束时由调用方恢复
+    rt.SetTransform(&IDENTITY);
 
     let rows_count = m.rows.len().clamp(1, 4);
     let header_h = 20.0 * scale;
     let row_h = 56.0 * scale;
-    let card_h = lm.card_pad * 2.0 + header_h + 14.0 * scale + (rows_count as f32) * row_h - 14.0 * scale;
-
-    let slide_offset = (1.0 - card_openness) * 16.0 * scale;
-    let card_right = dock_left - lm.pointer_w - 8.0 * scale + slide_offset;
-    let card_left = card_right - lm.card_w;
-
-    let mut card_top = pointer_y - card_h / 2.0;
-    if card_top < 12.0 * scale {
-        card_top = 12.0 * scale;
-    }
-    if card_top + card_h > screen_h - 12.0 * scale {
-        card_top = screen_h - 12.0 * scale - card_h;
-    }
-    let card_bottom = card_top + card_h;
-
-    let r_card = lm.card_radius;
-    let py = pointer_y.clamp(card_top + r_card + 20.0 * scale, card_bottom - r_card - 20.0 * scale);
-    let half_tail = lm.pointer_h * 0.5;
+    let burn = burn_forecast(m);
+    let burn_extra = if burn.is_some() { 16.0 * scale } else { 0.0 };
+    let card_h = lm.card_pad * 2.0 + header_h + 14.0 * scale + (rows_count as f32) * row_h - 14.0 * scale + burn_extra;
+    let card_w = lm.card_w;
+    let gap = 8.0 * scale;
     let reach = lm.pointer_w;
+    let half_tail = lm.pointer_h * 0.5;
+    let r_card = lm.card_radius;
+    let slide = (1.0 - card_openness) * 16.0 * scale;
 
-    // 1. 构建一体化水滴气泡外形（UsageBubbleShape，无缝融合指针三角形与卡片主体）
-    let bubble_path = eng.d2d_factory.CreatePathGeometry()?;
-    let sink = bubble_path.Open()?;
+    // 卡片矩形（物理空间恒正立）+ 尾巴方向
+    // tail_dir: 0=+x(右) 1=-x(左) 2=+y(下) 3=-y(上)
+    // 尾巴朝"环"的方向伸出（卡片在环的对侧）：
+    // 右停靠 → 卡片在左 → 尾巴朝右(+x=0)；左停靠 → 卡片在右 → 尾巴朝左(-x=1)
+    // 顶停靠 → 卡片在下 → 尾巴朝上(-y=3)；底停靠 → 卡片在上 → 尾巴朝下(+y=2)
+    // 卡片要让开的是胶囊**实际边缘**。环心在横栏里不在厚度中心
+    // （离边 28，中心是 39），所以卡片边 = 环心 + 环心到边缘的距离，
+    // 而不是环心 ± 半厚度 —— 后者会让卡片压进胶囊 11pt，盖住百分比那行。
+    // side 2/3 即横栏（顶/底停靠）。
+    let card_dock = match side {
+        2 => Dock::Edge(Edge::Top),
+        3 => Dock::Edge(Edge::Bottom),
+        1 => Dock::Edge(Edge::Left),
+        _ => Dock::Edge(Edge::Right),
+    };
+    let to_far_edge = lm.ring_to_far_edge(card_dock);
+    let (mut card_l, mut card_t, tail_dir) = match side {
+        2 => (0.0, ring_cy + to_far_edge + gap + slide, 3),
+        3 => (0.0, ring_cy - to_far_edge - gap - card_h - slide, 2),
+        1 => (ring_cx + to_far_edge + gap + slide, 0.0, 1),
+        _ => (ring_cx - to_far_edge - gap - card_w - slide, 0.0, 0),
+    };
+    // 沿边轴居中 + clamp
+    match side {
+        0 | 1 => {
+            card_t = (ring_cy - card_h / 2.0).clamp(12.0 * scale, (win_h - card_h - 12.0 * scale).max(12.0 * scale));
+        }
+        _ => {
+            card_l = (ring_cx - card_w / 2.0).clamp(12.0 * scale, (win_w - card_w - 12.0 * scale).max(12.0 * scale));
+        }
+    }
+    let card_r = card_l + card_w;
+    let card_b = card_t + card_h;
+    let infl = reach + 2.0;
+    CARD_RECT.with(|c| c.set((card_l - infl, card_t - infl, card_r + infl, card_b + infl)));
 
-    sink.BeginFigure(D2D_POINT_2F { x: card_left + r_card, y: card_top }, D2D1_FIGURE_BEGIN_FILLED);
-    sink.AddLine(D2D_POINT_2F { x: card_right - r_card, y: card_top });
-    sink.AddArc(&D2D1_ARC_SEGMENT {
-        point: D2D_POINT_2F { x: card_right, y: card_top + r_card },
-        size: D2D_SIZE_F { width: r_card, height: r_card },
-        rotationAngle: 0.0,
-        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-        arcSize: D2D1_ARC_SIZE_SMALL,
-    });
+    // 尾巴锚点（沿卡片边），clamp 到圆角之间
+    let (ax, ay) = match side {
+        0 | 1 => (
+            ring_cx,
+            ring_cy.clamp(card_t + r_card + 20.0 * scale, (card_b - r_card - 20.0 * scale).max(card_t + r_card + 20.0 * scale)),
+        ),
+        _ => (
+            ring_cx.clamp(card_l + r_card + 20.0 * scale, (card_r - r_card - 20.0 * scale).max(card_l + r_card + 20.0 * scale)),
+            ring_cy,
+        ),
+    };
 
-    sink.AddLine(D2D_POINT_2F { x: card_right, y: py - half_tail });
+    // 1. 卡片主体（圆角矩形）
+    rt.FillRoundedRectangle(
+        &D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: card_l, top: card_t, right: card_r, bottom: card_b },
+            radiusX: r_card,
+            radiusY: r_card,
+        },
+        &eng.brush_card,
+    );
 
-    // 水滴指针上侧流体曲线 (Pulse fluid turn 参数)
-    sink.AddBezier(&D2D1_BEZIER_SEGMENT {
-        point1: D2D_POINT_2F { x: card_right, y: py - half_tail * 0.5 },
-        point2: D2D_POINT_2F { x: card_right + reach * 0.55, y: py - half_tail * 0.22 },
-        point3: D2D_POINT_2F { x: card_right + reach, y: py },
-    });
+    // 2. 水滴尾巴（同色填充，四方向）
+    let tail = eng.d2d_factory.CreatePathGeometry()?;
+    let s = tail.Open()?;
+    match tail_dir {
+        0 => {
+            // +x 右
+            s.BeginFigure(D2D_POINT_2F { x: card_r, y: ay - half_tail }, D2D1_FIGURE_BEGIN_FILLED);
+            s.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: D2D_POINT_2F { x: card_r, y: ay - half_tail * 0.5 },
+                point2: D2D_POINT_2F { x: card_r + reach * 0.55, y: ay - half_tail * 0.22 },
+                point3: D2D_POINT_2F { x: card_r + reach, y: ay },
+            });
+            s.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: D2D_POINT_2F { x: card_r + reach * 0.55, y: ay + half_tail * 0.22 },
+                point2: D2D_POINT_2F { x: card_r, y: ay + half_tail * 0.5 },
+                point3: D2D_POINT_2F { x: card_r, y: ay + half_tail },
+            });
+        }
+        1 => {
+            // -x 左
+            s.BeginFigure(D2D_POINT_2F { x: card_l, y: ay - half_tail }, D2D1_FIGURE_BEGIN_FILLED);
+            s.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: D2D_POINT_2F { x: card_l, y: ay - half_tail * 0.5 },
+                point2: D2D_POINT_2F { x: card_l - reach * 0.55, y: ay - half_tail * 0.22 },
+                point3: D2D_POINT_2F { x: card_l - reach, y: ay },
+            });
+            s.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: D2D_POINT_2F { x: card_l - reach * 0.55, y: ay + half_tail * 0.22 },
+                point2: D2D_POINT_2F { x: card_l, y: ay + half_tail * 0.5 },
+                point3: D2D_POINT_2F { x: card_l, y: ay + half_tail },
+            });
+        }
+        2 => {
+            // +y 下
+            s.BeginFigure(D2D_POINT_2F { x: ax - half_tail, y: card_b }, D2D1_FIGURE_BEGIN_FILLED);
+            s.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: D2D_POINT_2F { x: ax - half_tail * 0.5, y: card_b },
+                point2: D2D_POINT_2F { x: ax - half_tail * 0.22, y: card_b + reach * 0.55 },
+                point3: D2D_POINT_2F { x: ax, y: card_b + reach },
+            });
+            s.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: D2D_POINT_2F { x: ax + half_tail * 0.22, y: card_b + reach * 0.55 },
+                point2: D2D_POINT_2F { x: ax + half_tail * 0.5, y: card_b },
+                point3: D2D_POINT_2F { x: ax + half_tail, y: card_b },
+            });
+        }
+        _ => {
+            // -y 上
+            s.BeginFigure(D2D_POINT_2F { x: ax - half_tail, y: card_t }, D2D1_FIGURE_BEGIN_FILLED);
+            s.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: D2D_POINT_2F { x: ax - half_tail * 0.5, y: card_t },
+                point2: D2D_POINT_2F { x: ax - half_tail * 0.22, y: card_t - reach * 0.55 },
+                point3: D2D_POINT_2F { x: ax, y: card_t - reach },
+            });
+            s.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: D2D_POINT_2F { x: ax + half_tail * 0.22, y: card_t - reach * 0.55 },
+                point2: D2D_POINT_2F { x: ax + half_tail * 0.5, y: card_t },
+                point3: D2D_POINT_2F { x: ax + half_tail, y: card_t },
+            });
+        }
+    }
+    s.EndFigure(D2D1_FIGURE_END_CLOSED);
+    s.Close()?;
+    rt.FillGeometry(&tail, &eng.brush_card, None);
+    rt.DrawRoundedRectangle(
+        &D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: card_l, top: card_t, right: card_r, bottom: card_b },
+            radiusX: r_card,
+            radiusY: r_card,
+        },
+        &eng.brush_hairline,
+        0.75,
+        None,
+    );
 
-    // 水滴指针下侧流体曲线
-    sink.AddBezier(&D2D1_BEZIER_SEGMENT {
-        point1: D2D_POINT_2F { x: card_right + reach * 0.55, y: py + half_tail * 0.22 },
-        point2: D2D_POINT_2F { x: card_right, y: py + half_tail * 0.5 },
-        point3: D2D_POINT_2F { x: card_right, y: py + half_tail },
-    });
-
-    sink.AddLine(D2D_POINT_2F { x: card_right, y: card_bottom - r_card });
-    sink.AddArc(&D2D1_ARC_SEGMENT {
-        point: D2D_POINT_2F { x: card_right - r_card, y: card_bottom },
-        size: D2D_SIZE_F { width: r_card, height: r_card },
-        rotationAngle: 0.0,
-        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-        arcSize: D2D1_ARC_SIZE_SMALL,
-    });
-
-    sink.AddLine(D2D_POINT_2F { x: card_left + r_card, y: card_bottom });
-    sink.AddArc(&D2D1_ARC_SEGMENT {
-        point: D2D_POINT_2F { x: card_left, y: card_bottom - r_card },
-        size: D2D_SIZE_F { width: r_card, height: r_card },
-        rotationAngle: 0.0,
-        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-        arcSize: D2D1_ARC_SIZE_SMALL,
-    });
-
-    sink.AddLine(D2D_POINT_2F { x: card_left, y: card_top + r_card });
-    sink.AddArc(&D2D1_ARC_SEGMENT {
-        point: D2D_POINT_2F { x: card_left + r_card, y: card_top },
-        size: D2D_SIZE_F { width: r_card, height: r_card },
-        rotationAngle: 0.0,
-        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-        arcSize: D2D1_ARC_SIZE_SMALL,
-    });
-
-    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-    sink.Close()?;
-
-    rt.FillGeometry(&bubble_path, &eng.brush_card, None);
-    rt.DrawGeometry(&bubble_path, &eng.brush_hairline, 0.75, None);
-
-    // 2. 卡片头部：图标 + 标题
-    let mut cur_y = card_top + lm.card_pad;
+    // 3. 头部：图标 + 标题
+    let mut cur_y = card_t + lm.card_pad;
     let icon_sz = 16.0 * scale;
     if let Some(bmp) = eng.logo_bitmaps.get(&m.provider) {
         let dest = D2D_RECT_F {
-            left: card_left + lm.card_pad,
+            left: card_l + lm.card_pad,
             top: cur_y + 1.0 * scale,
-            right: card_left + lm.card_pad + icon_sz,
+            right: card_l + lm.card_pad + icon_sz,
             bottom: cur_y + 1.0 * scale + icon_sz,
         };
         rt.DrawBitmap(bmp, Some(&dest), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
     }
-
     let title_u16: Vec<u16> = m.full.encode_utf16().collect();
     let title_rect = D2D_RECT_F {
-        left: card_left + lm.card_pad + icon_sz + 8.0 * scale,
+        left: card_l + lm.card_pad + icon_sz + 8.0 * scale,
         top: cur_y - 2.0 * scale,
-        right: card_right - lm.card_pad,
+        right: card_r - lm.card_pad,
         bottom: cur_y + 18.0 * scale,
     };
     rt.DrawText(&title_u16, &eng.font_title, &title_rect, &eng.brush_text_primary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
     cur_y += header_h + 14.0 * scale;
 
-    // 3. 渲染各用量行（Pulse 经典三行布局：名称+额度 / 进度条胶囊 / 百分比+重置时间）
-    let row_w = lm.card_w - lm.card_pad * 2.0;
-    for row in m.rows.iter().take(4) {
-        // 第一行：左侧名称，右侧额度明细
+    // 4. 用量行
+    let row_w = card_w - lm.card_pad * 2.0;
+    for (row_i, row) in m.rows.iter().enumerate().take(4) {
         let label_u16: Vec<u16> = row.label.encode_utf16().collect();
         let r1 = D2D_RECT_F {
-            left: card_left + lm.card_pad,
+            left: card_l + lm.card_pad,
             top: cur_y,
-            right: card_left + lm.card_pad + row_w * 0.55,
+            right: card_l + lm.card_pad + row_w * 0.55,
             bottom: cur_y + 16.0 * scale,
         };
         rt.DrawText(&label_u16, &eng.font_label, &r1, &eng.brush_text_primary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
         if !row.detail.is_empty() {
             let detail_u16: Vec<u16> = row.detail.encode_utf16().collect();
             let r_amount = D2D_RECT_F {
-                left: card_left + lm.card_pad + row_w * 0.45,
+                left: card_l + lm.card_pad + row_w * 0.45,
                 top: cur_y,
-                right: card_right - lm.card_pad,
+                right: card_r - lm.card_pad,
                 bottom: cur_y + 16.0 * scale,
             };
             rt.DrawText(&detail_u16, &eng.font_detail_right, &r_amount, &eng.brush_text_dim, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
-
-        // 第二行：Pulse 胶囊进度条 (高度 6pt)
-        cur_y += 14.0 * scale + 7.0 * scale;
-        let bar_h = 6.0 * scale;
-        let bar_track = D2D_RECT_F {
-            left: card_left + lm.card_pad,
-            top: cur_y,
-            right: card_right - lm.card_pad,
-            bottom: cur_y + bar_h,
-        };
-        rt.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: bar_track, radiusX: bar_h / 2.0, radiusY: bar_h / 2.0 }, &eng.brush_track);
-
         let frac = (row.used_pct as f32 / 100.0).clamp(0.0, 1.0);
-        if frac > 0.005 {
-            let fill_w = (row_w * frac).max(bar_h);
-            let bar_fill = D2D_RECT_F {
-                left: card_left + lm.card_pad,
+        if segmented {
+            cur_y += 14.0 * scale + 4.0 * scale;
+            let bar_h = 12.0 * scale;
+            let tick_w = 2.5 * scale;
+            let step = tick_w + 2.0 * scale;
+            let count = (((row_w + 2.0 * scale) / step).floor() as i32).max(1);
+            let mut lit = (frac * count as f32).round() as i32;
+            if frac > 0.0 {
+                lit = lit.max(1);
+            }
+            if frac < 1.0 {
+                lit = lit.min(count - 1);
+            }
+            let bar_brush = eng.color_for_fraction(frac, false, frac >= 0.999);
+            for t in 0..count {
+                let x0 = card_l + lm.card_pad + t as f32 * step;
+                let rect = D2D_RECT_F { left: x0, top: cur_y, right: x0 + tick_w, bottom: cur_y + bar_h };
+                let b = if t < lit { bar_brush } else { &eng.brush_track };
+                rt.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect, radiusX: tick_w / 2.0, radiusY: tick_w / 2.0 }, b);
+            }
+            cur_y += bar_h + 4.0 * scale;
+        } else {
+            cur_y += 14.0 * scale + 7.0 * scale;
+            let bar_h = 6.0 * scale;
+            let bar_track = D2D_RECT_F {
+                left: card_l + lm.card_pad,
                 top: cur_y,
-                right: card_left + lm.card_pad + fill_w,
+                right: card_r - lm.card_pad,
                 bottom: cur_y + bar_h,
             };
-            let bar_brush = eng.color_for_fraction(frac, false, frac >= 0.999);
-            rt.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: bar_fill, radiusX: bar_h / 2.0, radiusY: bar_h / 2.0 }, bar_brush);
+            rt.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: bar_track, radiusX: bar_h / 2.0, radiusY: bar_h / 2.0 }, &eng.brush_track);
+            if frac > 0.005 {
+                let fill_w = (row_w * frac).max(bar_h);
+                let bar_fill = D2D_RECT_F {
+                    left: card_l + lm.card_pad,
+                    top: cur_y,
+                    right: card_l + lm.card_pad + fill_w,
+                    bottom: cur_y + bar_h,
+                };
+                let bar_brush = eng.color_for_fraction(frac, false, frac >= 0.999);
+                rt.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: bar_fill, radiusX: bar_h / 2.0, radiusY: bar_h / 2.0 }, bar_brush);
+            }
+            cur_y += bar_h + 7.0 * scale;
         }
-
-        // 第三行：左侧已用百分比，右侧重置倒计时
-        cur_y += bar_h + 7.0 * scale;
         let pct_str = format!("{:.0}% Used", row.used_pct);
         let pct_u16: Vec<u16> = pct_str.encode_utf16().collect();
         let r_pct = D2D_RECT_F {
-            left: card_left + lm.card_pad,
+            left: card_l + lm.card_pad,
             top: cur_y,
-            right: card_left + lm.card_pad + row_w * 0.5,
+            right: card_l + lm.card_pad + row_w * 0.5,
             bottom: cur_y + 16.0 * scale,
         };
         let pct_brush = if frac >= 0.75 { &eng.brush_warning } else { &eng.brush_text_primary };
         rt.DrawText(&pct_u16, &eng.font_medium, &r_pct, pct_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
         if !row.reset.is_empty() {
             let reset_u16: Vec<u16> = row.reset.encode_utf16().collect();
             let r_reset = D2D_RECT_F {
-                left: card_left + lm.card_pad + row_w * 0.4,
+                left: card_l + lm.card_pad + row_w * 0.4,
                 top: cur_y,
-                right: card_right - lm.card_pad,
+                right: card_r - lm.card_pad,
                 bottom: cur_y + 16.0 * scale,
             };
             rt.DrawText(&reset_u16, &eng.font_detail_right, &r_reset, &eng.brush_text_dim, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
-
-        cur_y += 14.0 * scale + 14.0 * scale;
+        cur_y += 16.0 * scale;
+        if row_i == 0 {
+            if let Some((text, warn)) = &burn {
+                let bu: Vec<u16> = text.encode_utf16().collect();
+                let r_burn = D2D_RECT_F {
+                    left: card_l + lm.card_pad,
+                    top: cur_y,
+                    right: card_r - lm.card_pad,
+                    bottom: cur_y + 14.0 * scale,
+                };
+                let b_brush = if *warn { &eng.brush_warning } else { &eng.brush_text_dim };
+                rt.DrawText(&bu, &eng.font_detail, &r_burn, b_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                cur_y += 14.0 * scale;
+            }
+        }
+        cur_y += 14.0 * scale;
     }
 
+    rt.SetTransform(m3x2);
     Ok(())
+}
+
+/// Pulse BurnRate：由 used + 窗口 elapsed 推算耗尽时刻。数据不全绝不猜 → None。
+fn burn_forecast(m: &Metric) -> Option<(String, bool)> {
+    if m.window_seconds <= 0 || m.resets_at_unix <= 0 || m.spent || m.balance {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    let until_reset = m.resets_at_unix - now;
+    if until_reset <= 0 {
+        return None;
+    }
+    let elapsed = (1.0 - until_reset as f64 / m.window_seconds as f64).clamp(0.0, 1.0);
+    if elapsed < 0.03 {
+        return None; // 开窗期突发会放大成天文速率，Pulse 同规则
+    }
+    let used = m.used;
+    if used >= 1.0 {
+        return Some(("预计已耗尽".to_string(), true));
+    }
+    let elapsed_seconds = until_reset as f64 / (1.0 - elapsed) * elapsed;
+    let per_hour = used / elapsed_seconds * 3600.0;
+    if per_hour <= 0.0 {
+        return None;
+    }
+    let until_empty = (1.0 - used) / per_hour * 3600.0;
+    let exhausts = until_empty < until_reset as f64;
+    if exhausts && until_empty <= 7200.0 {
+        Some((format!("预计 {} 内耗尽", approx_duration(until_empty)), true))
+    } else if exhausts {
+        Some(("撑不到下次重置".to_string(), true))
+    } else {
+        Some(("预计够用至重置".to_string(), false))
+    }
+}
+
+/// Pulse approximate()：15 分钟 / 半小时一档的口语化时长。
+fn approx_duration(secs: f64) -> String {
+    let minutes = (secs / 60.0).round();
+    if minutes < 15.0 {
+        "不到 15 分钟".to_string()
+    } else if minutes < 68.0 {
+        let quarters = ((minutes / 15.0).round() as i32).max(1);
+        if quarters == 4 {
+            "约 1 小时".to_string()
+        } else {
+            format!("约 {} 分钟", quarters * 15)
+        }
+    } else {
+        let hours = (minutes / 30.0).round() / 2.0;
+        if (hours - hours.floor()).abs() < 0.01 {
+            format!("约 {} 小时", hours as i32)
+        } else {
+            format!("约 {:.1} 小时", hours)
+        }
+    }
 }

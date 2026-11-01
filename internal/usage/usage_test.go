@@ -188,4 +188,23 @@ func TestModelsRange(t *testing.T) {
 	if tr.ModelsRange("bad", today) != nil || tr.ModelsRange(today, "bad") != nil {
 		t.Fatalf("非法日期应返回 nil")
 	}
+	// EarliestDay：最早落盘日期为昨天（今日记录只进了内存聚合，尚未跨日）
+	if got := tr.EarliestDay(); got != yesterday {
+		t.Fatalf("EarliestDay=%q 期望 %q", got, yesterday)
+	}
+	// 全部区间 = 最早落盘日 → 今日
+	if mAll := tr.ModelsRange(tr.EarliestDay(), today); len(mAll) != 2 {
+		t.Fatalf("全部区间模型数错误: %+v", mAll)
+	}
+}
+
+// TestEarliestDayEmpty 无任何用量文件时 EarliestDay 返回空串。
+func TestEarliestDayEmpty(t *testing.T) {
+	tr, err := New(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if got := tr.EarliestDay(); got != "" {
+		t.Fatalf("空目录应返回空串，实际 %q", got)
+	}
 }

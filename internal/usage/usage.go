@@ -328,6 +328,31 @@ func (t *Tracker) ModelsRange(fromDay, toDay string) []ModelUsage {
 	return list
 }
 
+// EarliestDay 最早有落盘记录的日期（YYYY-MM-DD）；无记录返回空串。
+// 用于「全部」区间：避免从纪元日逐天试开文件。
+func (t *Tracker) EarliestDay() string {
+	ents, err := os.ReadDir(t.dir)
+	if err != nil {
+		return ""
+	}
+	earliest := ""
+	for _, e := range ents {
+		n := e.Name()
+		if !strings.HasPrefix(n, "usage-") || !strings.HasSuffix(n, ".jsonl") {
+			continue
+		}
+		d := strings.TrimSuffix(strings.TrimPrefix(n, "usage-"), ".jsonl") // 20060102
+		if len(d) != 8 {
+			continue
+		}
+		day := d[:4] + "-" + d[4:6] + "-" + d[6:]
+		if earliest == "" || day < earliest {
+			earliest = day
+		}
+	}
+	return earliest
+}
+
 // SumModels 汇总按模型聚合条目。
 func SumModels(items []ModelUsage) Totals {
 	var tt Totals
